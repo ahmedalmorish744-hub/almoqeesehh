@@ -508,38 +508,43 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    // عرض خلية المدة العربية بمقاطع منفصلة لمطابقة التنسيق المرجعي:
-    // التنسيق المرئي L→R: `N يوم ( YYYY-MM-DD إلى YYYY-MM-DD )`
-    // — عدد الأيام والقوس المفتوح على اليسار البصري،
-    // — التواريخ بصيغة YYYY-MM-DD (مطابقة للمرجع)،
-    // — كلمة "إلى" بين التاريخين،
-    // — القوس المغلق على اليمين البصري.
+    // عرض خلية المدة العربية باتجاه RTL (من اليمين إلى اليسار) مع تنسيق مطابق للمثال:
+    // `1 يوم (2026-06-09 إلى 2026-06-09)`
+    // — `1 يوم` على اليمين البصري (بداية القراءة RTL)
+    // — `(` يليه التاريخ الأول بصيغة YYYY-MM-DD
+    // — `إلى` بين التاريخين
+    // — التاريخ الثاني ثم `)` على اليسار البصري (نهاية القراءة RTL)
+    // — مسافة واحدة فقط بين كل عنصر، بلا مسافات داخل الأقواس
     //
-    // Render the Arabic duration cell as separate pieces to match the reference:
-    // Visual L→R: `N يوم ( YYYY-MM-DD إلى YYYY-MM-DD )`
-    // — Day count + open paren on visual LEFT,
-    // — Dates in YYYY-MM-DD format (matching reference),
-    // — "إلى" between the two dates,
-    // — Close paren on visual RIGHT.
+    // Render the Arabic duration cell in true RTL direction matching the example:
+    // `1 يوم (2026-06-09 إلى 2026-06-09)`
+    // — `1 يوم` on visual RIGHT (RTL start)
+    // — `(` followed by first date in YYYY-MM-DD
+    // — `إلى` between the two dates
+    // — Second date then `)` on visual LEFT (RTL end)
+    // — Single space between elements, no spaces inside parens
     const toArabicDate = (ddmmyyyy: string) => {
-      // حوّل DD-MM-YYYY إلى YYYY-MM-DD لمطابقة التنسيق المرجعي
-      // Convert DD-MM-YYYY to YYYY-MM-DD to match reference format
+      // حوّل DD-MM-YYYY إلى YYYY-MM-DD لمطابقة التنسيق المطلوب
+      // Convert DD-MM-YYYY to YYYY-MM-DD to match required format
       const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(ddmmyyyy);
       if (m) return `${m[3]}-${m[2]}-${m[1]}`;
       return ddmmyyyy;
     };
     const startDateAr = toArabicDate(startDateFormatted);
     const endDateAr = toArabicDate(endDateFormatted);
+    // الترتيب: العنصر الأول في المصفوفة يُوضع على اليمين البصري،
+    // والعنصر الأخير على اليسار البصري (محاذاة لليمين مع تدفق RTL).
+    // Order: first array element is placed on visual RIGHT,
+    // last element on visual LEFT (right-aligned with RTL flow).
     const durPieces = [
-      { text: " ) ", font: fontEnReg },                    // يميني بصرياً: قوس إغلاق / visual rightmost: close paren
-      { text: " ", font: fontEnReg },                      // مسافة / space
-      { text: endDateAr, font: fontEnReg },                // التاريخ الثاني YYYY-MM-DD / second date YYYY-MM-DD
-      { text: " ", font: fontEnReg },                      // مسافة / space
-      { text: "الى", font: fontArReg },                    // كلمة "الى" / "to" word
-      { text: " ", font: fontEnReg },                      // مسافة / space
-      { text: startDateAr, font: fontEnReg },              // التاريخ الأول YYYY-MM-DD / first date YYYY-MM-DD
-      { text: " ( ", font: fontEnReg },                    // مسافة + قوس فتح + مسافة / space + open paren + space
-      { text: durText, font: fontArReg },                  // يساري بصرياً: المدة بالعربي / visual leftmost: Arabic duration
+      { text: durText, font: fontArReg },          // يميني بصرياً: المدة بالعربي / visual rightmost: Arabic duration (e.g. "1 يوم")
+      { text: " (", font: fontEnReg },             // مسافة + قوس فتح / space + open paren
+      { text: startDateAr, font: fontEnReg },      // التاريخ الأول YYYY-MM-DD / first date
+      { text: " ", font: fontEnReg },              // مسافة / space
+      { text: "إلى", font: fontArReg },            // كلمة "إلى" / "to" word
+      { text: " ", font: fontEnReg },              // مسافة / space
+      { text: endDateAr, font: fontEnReg },        // التاريخ الثاني YYYY-MM-DD / second date
+      { text: ")", font: fontEnReg },              // يساري بصرياً: قوس إغلاق / visual leftmost: close paren
     ];
     renderPiecesRtl({
       pieces: durPieces,
@@ -649,13 +654,21 @@ export async function POST(req: NextRequest) {
 
     const hasLicense = !!(payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim()));
     if (hasLicense) {
-      // رقم الترخيص في السطر الثالث — اعرضه كمقاطع منفصلة لمنع عكس الأرقام
-      // License number on line 3 — render as separate pieces to prevent digit reversal
+      // رقم الترخيص في سطر منفصل باتجاه RTL مع عبارة "رقم الترخيص:" قبله:
+      // التنسيق المرئي R→L: `رقم الترخيص: 1410101201200443`
+      // — `رقم الترخيص` على اليمين البصري (بداية RTL)
+      // — `: ` (نقطتين + مسافة)
+      // — الرقم على اليسار البصري (نهاية RTL)
+      //
+      // License number on a separate line in RTL direction with "رقم الترخيص:" before it:
+      // Visual R→L: `رقم الترخيص: 1410101201200443`
+      // — `رقم الترخيص` on visual RIGHT (RTL start)
+      // — `: ` (colon + space)
+      // — The number on visual LEFT (RTL end)
       const licensePieces = [
-        { text: ":", font: fontEnReg },                       // يميني بصرياً: نقطتين / visual rightmost: colon
-        { text: payload.licenseNumber, font: fontEnReg },     // الرقم / the number
-        { text: " ", font: fontEnReg },                       // مسافة / space
-        { text: "رقم الترخيص", font: fontArReg },             // يساري بصرياً: النص العربي / visual leftmost: Arabic label
+        { text: "رقم الترخيص", font: fontArReg },             // يميني بصرياً: العبارة العربية / visual rightmost: Arabic label
+        { text: ": ", font: fontEnReg },                      // نقطتين + مسافة / colon + space
+        { text: payload.licenseNumber, font: fontEnReg },     // يساري بصرياً: الرقم / visual leftmost: the number
       ];
       renderPiecesRtl({
         pieces: licensePieces,
