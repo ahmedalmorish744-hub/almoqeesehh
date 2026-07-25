@@ -226,6 +226,61 @@ export async function POST(req: NextRequest) {
       doc.text(cleanText, x, startY, textOpts);
     };
 
+    /**
+     * اعرض عدة مقاطع نصية في صف واحد، محاذاة لليمين (RTL)، كل مقطع بخطه الخاص.
+     * هذا يتلافى مشكلة BiDi في pdfkit التي تعكس الأرقام والأقواس في النصوص المختلطة.
+     *
+     * Renders multiple text pieces on a single line, right-aligned (RTL),
+     * each piece with its own font. This avoids pdfkit's BiDi reversing
+     * digits and brackets in mixed RTL/LTR text.
+     *
+     * كل مقطع يُعرض في مربع نص مستقل (text box) كما طلب المستخدم: الأقواس،
+     * التواريخ، وكلمة "الى" كل في مربع لحاله تفادياً للتخبط.
+     * Each piece is rendered in its own text box per user request: brackets,
+     * dates, and the word "الى" each in its own box to avoid mixing.
+     */
+    const renderPiecesRtl = (opts: {
+      pieces: { text: string; font: any }[];
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      fontSize: number;
+      color: string;
+    }) => {
+      const { pieces, x, y, width, height, fontSize, color } = opts;
+
+      // احسب عرض كل مقطع بالخط الخاص به
+      // Compute width of each piece using its own font
+      const widths = pieces.map((p) => {
+        doc.font(p.font).fontSize(fontSize);
+        return doc.widthOfString(p.text);
+      });
+
+      // ارتفاع السطر للتوسيط الرأسي
+      // Line height for vertical centering
+      doc.fontSize(fontSize);
+      const textH = doc.currentLineHeight(true);
+      const pieceY = y + (height - textH) / 2;
+
+      // محاذاة لليمين: ابدأ من الحافة اليمنى للخلية، ضع كل مقطع بيمينه عند الحافة
+      // ثم حرّك الحافة إلى اليسار بعرض المقطع.
+      // Right-align: start from the cell's right edge, place each piece's
+      // right edge at the current right edge, then move the edge left by
+      // the piece's width.
+      let rightEdge = x + width;
+      for (let i = 0; i < pieces.length; i++) {
+        const piece = pieces[i];
+        const w = widths[i];
+        const pieceX = rightEdge - w;
+        doc.font(piece.font).fillColor(color).fontSize(fontSize);
+        // lineBreak: false يمنع لف النص إلى سطر جديد (كل البيانات في سطر واحد)
+        // lineBreak: false prevents wrapping (all data on one line)
+        doc.text(piece.text, pieceX, pieceY, { lineBreak: false });
+        rightEdge = pieceX;
+      }
+    };
+
     // --- Header: three logos ---
     // الشعار الأيسر: شعار منصة صحة (ثابت)
     // Left logo: SEHA platform logo (static)
@@ -233,13 +288,11 @@ export async function POST(req: NextRequest) {
     // الشعار الأوسط: نص المملكة العربية السعودية (ثابت)
     // Center logo: Kingdom of Saudi Arabia text (static)
     if (fs.existsSync(KINGDOM_TEXT)) doc.image(KINGDOM_TEXT, (pageWidth - 180) / 2, 70, { width: 180, align: "center" });
-    // الشعار الأيمن: شعار المنشأة المرفوع إن وُجد، وإلا الشعار الافتراضي (geometric-shape)
-    // Right logo: uploaded facility logo if present, otherwise default geometric shape
-    if (uploadedLogoBuffer) {
-      // استخدم fit للحفاظ على نسبة الأبعاد داخل صندوق 170×100
-      // Use fit to preserve aspect ratio inside a 170x100 box
-      doc.image(uploadedLogoBuffer, pageWidth - 210, 30, { fit: [170, 110], align: "center", valign: "center" });
-    } else if (fs.existsSync(GEOMETRIC)) {
+    // الشعار الأيمن: الشعار الافتراضي (geometric-shape) دائماً.
+    // الشعار المرفوع يظهر في التذييل فقط فوق اسم المنشأة كما طلب المستخدم.
+    // Right logo: default geometric shape always.
+    // The uploaded logo appears in the footer only, above the hospital name, per user request.
+    if (fs.existsSync(GEOMETRIC)) {
       doc.image(GEOMETRIC, pageWidth - 180, 40, { width: 170 });
     }
 
@@ -403,15 +456,9 @@ export async function POST(req: NextRequest) {
     };
 
     const durText = getArabicDuration(payload.dayCount);
-    const duration = `${payload.dayCount} day(s) (${startDateFormatted} to ${endDateFormatted})`;
-    // استخدم أقواس ASCII العادية ( ) التي يدعمها خط NotoSansArabic و Times معاً
-    // استخدم علامات LRM (U+200E) حول التواريخ لإجبار الأرقام على البقاء بصيغة DD-MM-YYYY
-    // في السياق العربي (RTL) ومنع خوارزمية BiDi من عكس ترتيب الأرقام.
-    // Use regular ASCII parentheses (supported by both NotoSansArabic and Times).
-    // Wrap each date with LRM (U+200E) marks to keep digits in DD-MM-YYYY order
-    // inside the RTL Arabic context (prevents BiDi from reversing digit pairs).
-    const LRM = "\u200E";
-    const durationAr = `${durText} ( ${LRM}${startDateFormatted}${LRM} الى ${LRM}${endDateFormatted}${LRM} )`;
+    // أزل "(s)" بعد كلمة day بناءً على طلب المستخدم — أصبحت "day" فقط.
+    // Removed the "(s)" after "day" per user request — now just "day".
+    const duration = `${payload.dayCount} day (${startDateFormatted} to ${endDateFormatted})`;
 
     drawRow("Leave ID", payload.leaveNumber, "رمز الإجازة");
 
@@ -459,14 +506,26 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    // عرض خلية المدة العربية بخطوط مختلطة (Arabic → NotoSansArabic, LTR → Times)
-    // لمنع خوارزمية BiDi في pdfkit من عكس أرقام التواريخ عند استخدام خط عربي
-    // للنص بالكامل. كل مقطع عربي يُعرض بخط NotoSansArabic مع تشكيل RTL،
-    // وكل مقطع أرقام/أقواس يُعرض بخط Times بصيغة LTR بدون تشكيل.
-    // Render the Arabic duration cell with mixed fonts (Arabic → NotoSansArabic,
-    // LTR runs → Times) to prevent pdfkit's BiDi from reversing date digits.
-    renderMixedRtlCell({
-      text: durationAr,
+    // عرض خلية المدة العربية كمقاطع نصية منفصلة في مربعات نص مستقلة:
+    // كل قوس، كل تاريخ، وكلمة "الى" كل في مربع نص لحاله تفادياً لتخبط BiDi
+    // وعكس الأرقام. كل المقاطع في سطر واحد (lineBreak: false) ومحاذاة لليمين.
+    //
+    // Render the Arabic duration cell as separate text pieces in independent
+    // text boxes: each bracket, each date, and the word "الى" each in its own
+    // box to avoid BiDi mixing and digit reversal. All pieces on one line
+    // (lineBreak: false), right-aligned.
+    const durPieces = [
+      { text: durText, font: fontArReg },                  // يميني: المدة بالعربي / rightmost: Arabic duration
+      { text: " ( ", font: fontEnReg },                    // مسافة + قوس فتح + مسافة / space + open paren + space
+      { text: startDateFormatted, font: fontEnReg },       // التاريخ الأول (LTR) / first date
+      { text: " ", font: fontEnReg },                      // مسافة / space
+      { text: "الى", font: fontArReg },                    // كلمة "الى" في مربع مستقل / "to" word in its own box
+      { text: " ", font: fontEnReg },                      // مسافة / space
+      { text: endDateFormatted, font: fontEnReg },         // التاريخ الثاني (LTR) / second date
+      { text: " ) ", font: fontEnReg },                    // مسافة + قوس إغلاق + مسافة / space + close paren + space
+    ];
+    renderPiecesRtl({
+      pieces: durPieces,
       x: startX + col1W + subColW + 10,
       y: currentY,
       width: subColW - 20,
@@ -547,39 +606,66 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    drawTextAr(payload.hospitalName || "", rightCenterX - 125, footerY + 100, {
-      width: 250,
-      align: "center",
-      weight: "bold",
-      fontSize: 12,
-      color: "#000000",
-    });
-    drawTextEn(payload.hospitalNameEn || "", rightCenterX - 125, footerY + 135, {
-      width: 250,
-      align: "center",
-      weight: "bold",
-      fontSize: 12,
-      color: "#000000",
-    });
+    // تخطيط اسم المنشأة في التذييل:
+    // - بدون رقم ترخيص: الاسم العربي والإنجليزي في سطر واحد (عربي يمين، إنجليزي يسار).
+    // - مع رقم ترخيص: الاسم العربي في السطر الأول، الإنجليزي ينزل للسطر الثاني،
+    //   ثم رقم الترخيص في السطر الثالث.
+    //
+    // Footer hospital name layout:
+    // - Without license number: Arabic and English names on one line (AR right, EN left).
+    // - With license number: Arabic on line 1, English drops to line 2,
+    //   then license number on line 3.
+    const hasLicense = !!(payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim()));
 
-    if (payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim())) {
-      // استخدم النقطتين العاديتين ":" بدلاً من النقطتين العريضتين "：" لأن NotoSansArabic
-      // قد لا يدعم الحرف العريض فيظهر كمربع صغير. علامات LRM حول الرقم تمنع عكسه.
-      // Use regular ASCII colon ":" instead of fullwidth "：" (NotoSansArabic may lack the
-      // fullwidth glyph and render a tofu box). LRM marks around the number prevent reversal.
-      const LRM = "\u200E";
-      const fullLine = `رقم الترخيص: ${LRM}${payload.licenseNumber}${LRM}`;
-      // استخدم العرض المختلط لمنع عكس الأرقام في سياق RTL
-      // Use mixed rendering to prevent digit reversal in RTL context
-      renderMixedRtlCell({
-        text: fullLine,
+    if (hasLicense) {
+      // 3 أسطر: عربي، إنجليزي، ترخيص / 3 lines: AR, EN, license
+      drawTextAr(payload.hospitalName || "", rightCenterX - 125, footerY + 100, {
+        width: 250,
+        align: "center",
+        weight: "bold",
+        fontSize: 12,
+        color: "#000000",
+      });
+      drawTextEn(payload.hospitalNameEn || "", rightCenterX - 125, footerY + 130, {
+        width: 250,
+        align: "center",
+        weight: "bold",
+        fontSize: 12,
+        color: "#000000",
+      });
+
+      // رقم الترخيص في السطر الثالث — اعرضه كمقاطع منفصلة لمنع عكس الأرقام
+      // License number on line 3 — render as separate pieces to prevent digit reversal
+      const licensePieces = [
+        { text: "رقم الترخيص:", font: fontArReg },
+        { text: " ", font: fontEnReg },
+        { text: payload.licenseNumber, font: fontEnReg },
+      ];
+      renderPiecesRtl({
+        pieces: licensePieces,
         x: rightCenterX - 150,
-        y: footerY + 155,
+        y: footerY + 158,
+        width: 300,
+        height: 25,
+        fontSize: 12,
+        color: "#000000",
+      });
+    } else {
+      // سطر واحد: عربي (يمين) + إنجليزي (يسار) — كلاهما في نفس الـ Y
+      // One line: AR (right) + EN (left) — both at the same Y
+      const namePieces = [
+        { text: payload.hospitalName || "", font: fontArBold },   // يميني: الاسم عربي / rightmost: AR name
+        { text: "    ", font: fontEnReg },                        // فاصل 4 مسافات / 4-space separator
+        { text: payload.hospitalNameEn || "", font: fontEnBold }, // يساري: الاسم إنجليزي / leftmost: EN name
+      ];
+      renderPiecesRtl({
+        pieces: namePieces,
+        x: rightCenterX - 150,
+        y: footerY + 100,
         width: 300,
         height: 30,
         fontSize: 12,
         color: "#000000",
-        weight: "bold",
       });
     }
 

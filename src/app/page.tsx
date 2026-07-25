@@ -206,7 +206,7 @@ export default function Home() {
         setLogoFileName(file.name);
         toast({
           title: "تم رفع الشعار",
-          description: `سيظهر الشعار "${file.name}" في رأس وتذييل ملف PDF.`,
+          description: `سيظهر الشعار "${file.name}" في أسفل ملف PDF فقط، فوق اسم المنشأة.`,
         });
       }
     };
@@ -573,7 +573,7 @@ export default function Home() {
                 </CardTitle>
                 <CardDescription>
                   ارفع شعار المستشفى أو المنشأة الطبية بصيغة PNG أو JPG (الحد الأقصى 5 ميغابايت).
-                  سيظهر الشعار في رأس ملف PDF (يمين الصفحة) وفوق اسم المنشأة في التذييل. إن لم ترفع
+                  سيظهر الشعار في أسفل ملف PDF فقط، فوق اسم المنشأة. إن لم ترفع
                   شعاراً، سيُستخدم الشعار الافتراضي.
                 </CardDescription>
               </CardHeader>
