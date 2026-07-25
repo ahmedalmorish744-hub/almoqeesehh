@@ -2,96 +2,241 @@
  * POST /api/upload-leave
  * Body: LeaveFormData (JSON)
  *
- * Forwards the data to the existing Railway-hosted backend at
- * /api/bot/add_leave, using the same API key + payload the Python bot used.
+ * يحفظ بيانات الإجازة المرضية مباشرة في قاعدة بيانات Vercel Postgres.
+ * لا اعتماد على Railway إطلاقاً — كل البيانات تُخزَّن على Vercel.
  *
- * This route exists so the browser never exposes the API key, and so CORS
- * is handled server-side (Railway backend may not allow direct browser calls).
+ * يُنشئ أو يربط سجلات Nationality / Hospital / Doctor عند الحاجة،
+ * ويُخزّن السجل الرئيسي في جدول sick_leaves.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { LeaveFormData } from "@/lib/leave-form";
-import { buildApiPayload } from "../generate-pdf/route";
+import { LeaveFormData, DEFAULTS } from "@/lib/leave-form";
+import {
+  normalizeDateToDDMMYYYY,
+  calculateDays,
+  generateLeaveId,
+  toISODate,
+  toTimeDisplay,
+} from "@/lib/parser";
+import { sql, emptyToNull, SCHEMA_SQL } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Environment variables — set these on Vercel
-const API_BASE_URL =
-  process.env.API_BASE_URL || "https://alehtiat-almorish-production.up.railway.app";
-const API_ENDPOINT = process.env.API_ENDPOINT || "/api/bot/add_leave";
-const BOT_API_KEY = process.env.BOT_API_KEY || "seha_bot_secret_key_2025";
-
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LeaveFormData;
-    const payload = buildApiPayload(body);
+    const filled: LeaveFormData = { ...DEFAULTS, ...body } as any;
 
-    const url = API_BASE_URL + API_ENDPOINT;
-    console.log("[upload-leave] POST ->", url, "leave:", payload.leaveNumber);
+    if (!filled.id_number) filled.id_number = DEFAULTS.id_number;
+    if (!filled.patient_name_ar) filled.patient_name_ar = DEFAULTS.patient_name_ar;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const leaveNumber = generateLeaveId(
+      filled.id_number,
+      filled.admission_date_gregorian,
+      filled.discharge_date_gregorian,
+    );
+    const dayCount = calculateDays(
+      filled.admission_date_gregorian,
+      filled.discharge_date_gregorian,
+    );
 
-    let apiResult: any;
+    const entryDate = toISODate(normalizeDateToDDMMYYYY(filled.admission_date_gregorian));
+    const exitDate = toISODate(normalizeDateToDDMMYYYY(filled.discharge_date_gregorian));
+    const issueDate = entryDate || new Date().toISOString().slice(0, 10);
+    const timeDisplay = toTimeDisplay(filled.time) || filled.time;
+
+    // اضمن وجود الجداول (آمن للاستدعاء المتكرر)
     try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          Accept: "application/json",
-          "X-API-Key": BOT_API_KEY,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      const text = await resp.text();
-      try {
-        apiResult = JSON.parse(text);
-      } catch {
-        apiResult = { success: false, message: text };
-      }
-      apiResult = apiResult || {};
-      apiResult.httpStatus = resp.status;
-    } catch (fetchErr: any) {
-      clearTimeout(timeout);
-      if (fetchErr?.name === "AbortError") {
+      await sql.query(SCHEMA_SQL);
+    } catch (dbErr: any) {
+      const msg = String(dbErr?.message || dbErr || "");
+      if (msg.includes("missing_connection_string") || msg.includes("connect")) {
         return NextResponse.json(
           {
             success: false,
-            message: "انتهت مهلة الاتصال بالخادم (Railway). تأكد أن الموقع يعمل.",
-            leave_id: payload.leaveNumber,
+            message:
+              "قاعدة بيانات Vercel Postgres غير مربوطة. اربط قاعدة بيانات من Vercel Dashboard → Storage ثم نفّذ schema.sql مرة واحدة لإنشاء الجداول.",
+            leave_id: leaveNumber,
           },
-          { status: 504 },
+          { status: 503 },
         );
       }
-      return NextResponse.json(
-        {
-          success: false,
-          message: `فشل الاتصال بالخادم: ${fetchErr?.message || fetchErr}`,
-          leave_id: payload.leaveNumber,
-        },
-        { status: 502 },
-      );
+      throw dbErr;
     }
 
-    // Normalize Railway backend response to a friendly shape for the UI
-    const friendly = {
-      success: !!apiResult.success,
-      message: apiResult.message || (apiResult.success ? "تم رفع البيانات بنجاح" : "فشل رفع البيانات"),
-      leave_id: payload.leaveNumber,
-      day_count: payload.dayCount,
-      backend: apiResult,
-    };
+    // 1) تأكد من وجود مستخدم افتراضي للسجلات القادمة من الويب
+    await sql`
+      INSERT INTO users (username, password, role, is_active)
+      VALUES ('web_user', ${`web_internal_${Date.now()}`}, 'admin', TRUE)
+      ON CONFLICT (username) DO NOTHING
+    `;
+    const userResult = await sql`SELECT id FROM users WHERE username = 'web_user'`;
+    const userId = userResult.rows[0]?.id ?? 1;
 
-    return NextResponse.json(friendly, {
-      status: friendly.success ? 200 : 502,
+    // 2) الجنسية: ابحث أو أنشئ
+    let nationalityId: number | null = null;
+    const natAr = emptyToNull(filled.nationality_ar);
+    const natEn = emptyToNull(filled.nationality_en);
+    if (natAr || natEn) {
+      let natRows;
+      if (natAr) {
+        natRows = await sql`SELECT id FROM nationalities WHERE name_ar = ${natAr} LIMIT 1`;
+      }
+      if (!natRows || natRows.rowCount === 0) {
+        if (natEn) {
+          natRows = await sql`SELECT id FROM nationalities WHERE name_en = ${natEn} LIMIT 1`;
+        }
+      }
+      if (natRows && natRows.rowCount && (natRows.rowCount as number) > 0) {
+        nationalityId = natRows.rows[0].id as number;
+      } else {
+        const ins = await sql`
+          INSERT INTO nationalities (name_ar, name_en)
+          VALUES (${natAr}, ${natEn})
+          RETURNING id
+        `;
+        nationalityId = ins.rows[0].id as number;
+      }
+    }
+
+    // 3) المنشأة: ابحث أو أنشئ
+    let hospitalId: number | null = null;
+    const hospAr = emptyToNull(filled.hospital_name_ar);
+    const hospEn = emptyToNull(filled.hospital_name_en);
+    const licenseNumber = emptyToNull(filled.license_number);
+    if (hospAr || hospEn) {
+      let hospRows;
+      if (hospAr) {
+        hospRows = await sql`SELECT id, license_number FROM hospitals WHERE name_ar = ${hospAr} LIMIT 1`;
+      }
+      if (!hospRows || hospRows.rowCount === 0) {
+        if (hospEn) {
+          hospRows = await sql`SELECT id, license_number FROM hospitals WHERE name_en = ${hospEn} LIMIT 1`;
+        }
+      }
+      if (hospRows && hospRows.rowCount && (hospRows.rowCount as number) > 0) {
+        hospitalId = hospRows.rows[0].id as number;
+        // حدّث رقم الترخيص إن كان مفقوداً
+        if (licenseNumber && !hospRows.rows[0].license_number) {
+          await sql`UPDATE hospitals SET license_number = ${licenseNumber} WHERE id = ${hospitalId}`;
+        }
+      } else {
+        const ins = await sql`
+          INSERT INTO hospitals (name_ar, name_en, type, license_number, user_id)
+          VALUES (${hospAr}, ${hospEn}, 'private', ${licenseNumber}, ${userId})
+          RETURNING id
+        `;
+        hospitalId = ins.rows[0].id as number;
+      }
+    }
+
+    // 4) الطبيب: ابحث أو أنشئ
+    let doctorId: number | null = null;
+    const docAr = emptyToNull(filled.doctor_name_ar);
+    const docEn = emptyToNull(filled.doctor_name_en);
+    const specAr = emptyToNull(filled.position_ar);
+    const specEn = emptyToNull(filled.position_en);
+    if (docAr || docEn) {
+      let docRows;
+      if (docAr) {
+        docRows = await sql`SELECT id FROM doctors WHERE name_ar = ${docAr} LIMIT 1`;
+      }
+      if (!docRows || docRows.rowCount === 0) {
+        if (docEn) {
+          docRows = await sql`SELECT id FROM doctors WHERE name_en = ${docEn} LIMIT 1`;
+        }
+      }
+      if (docRows && docRows.rowCount && (docRows.rowCount as number) > 0) {
+        doctorId = docRows.rows[0].id as number;
+      } else {
+        const ins = await sql`
+          INSERT INTO doctors (name_ar, name_en, specialty_ar, specialty_en, hospital_id, user_id)
+          VALUES (${docAr}, ${docEn}, ${specAr}, ${specEn}, ${hospitalId}, ${userId})
+          RETURNING id
+        `;
+        doctorId = ins.rows[0].id as number;
+      }
+    }
+
+    // 5) السجل الرئيسي: حدّث إن وُجد بنفس gsl_code + identity_number، وإلا أنشئ
+    const existing = await sql`
+      SELECT id FROM sick_leaves
+      WHERE gsl_code = ${leaveNumber} AND identity_number = ${filled.id_number}
+      LIMIT 1
+    `;
+
+    let recordId: number;
+    if (existing.rowCount && (existing.rowCount as number) > 0) {
+      recordId = existing.rows[0].id as number;
+      await sql`
+        UPDATE sick_leaves SET
+          name_ar = ${filled.patient_name_ar},
+          name_en = ${emptyToNull(filled.patient_name_en) ?? filled.patient_name_ar},
+          date_from = ${entryDate},
+          date_to = ${exitDate},
+          day_count = ${dayCount},
+          issue_date = ${issueDate},
+          time_from = ${timeDisplay},
+          nationality_id = ${nationalityId},
+          nationality_ar = ${natAr},
+          nationality_en = ${natEn},
+          employer = ${emptyToNull(filled.employer_ar)},
+          employer_en = ${emptyToNull(filled.employer_en)},
+          doctor_id = ${doctorId},
+          doctor_name_ar = ${docAr},
+          doctor_name_en = ${docEn},
+          doctor_specialty_ar = ${specAr},
+          doctor_specialty_en = ${specEn},
+          hospital_id = ${hospitalId},
+          hospital_name_ar = ${hospAr},
+          hospital_name_en = ${hospEn},
+          license_number = ${licenseNumber},
+          leave_type = 'sick',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${recordId}
+      `;
+    } else {
+      const ins = await sql`
+        INSERT INTO sick_leaves (
+          gsl_code, identity_number, name_ar, name_en,
+          date_from, date_to, day_count, issue_date, time_from,
+          nationality_id, nationality_ar, nationality_en,
+          employer, employer_en,
+          doctor_id, doctor_name_ar, doctor_name_en,
+          doctor_specialty_ar, doctor_specialty_en,
+          hospital_id, hospital_name_ar, hospital_name_en,
+          license_number, leave_type, user_id
+        ) VALUES (
+          ${leaveNumber}, ${filled.id_number}, ${filled.patient_name_ar},
+          ${emptyToNull(filled.patient_name_en) ?? filled.patient_name_ar},
+          ${entryDate}, ${exitDate}, ${dayCount}, ${issueDate}, ${timeDisplay},
+          ${nationalityId}, ${natAr}, ${natEn},
+          ${emptyToNull(filled.employer_ar)}, ${emptyToNull(filled.employer_en)},
+          ${doctorId}, ${docAr}, ${docEn},
+          ${specAr}, ${specEn},
+          ${hospitalId}, ${hospAr}, ${hospEn},
+          ${licenseNumber}, 'sick', ${userId}
+        )
+        RETURNING id
+      `;
+      recordId = ins.rows[0].id as number;
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "تم حفظ بيانات الإجازة في قاعدة بيانات Vercel Postgres بنجاح",
+      leave_id: leaveNumber,
+      day_count: dayCount,
+      record_id: recordId,
     });
   } catch (err: any) {
     console.error("[upload-leave] Error:", err);
     return NextResponse.json(
-      { success: false, message: err?.message || "خطأ غير متوقع" },
+      {
+        success: false,
+        message: `فشل الحفظ: ${err?.message || "خطأ غير متوقع"}`,
+      },
       { status: 500 },
     );
   }

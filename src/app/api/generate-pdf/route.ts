@@ -311,7 +311,9 @@ export async function POST(req: NextRequest) {
 
     const durText = getArabicDuration(payload.dayCount);
     const duration = `${payload.dayCount} day(s) (${startDateFormatted} to ${endDateFormatted})`;
-    const durationAr = `${durText} (${startDateFormatted} الى ${endDateFormatted})`;
+    // استخدم الأقواس العربية العريضة （） التي تُعرض بشكل صحيح في اتجاه RTL
+    // Use fullwidth parentheses that render correctly in RTL context
+    const durationAr = `${durText} （${startDateFormatted} الى ${endDateFormatted}）`;
 
     drawRow("Leave ID", payload.leaveNumber, "رمز الإجازة");
 
@@ -440,12 +442,13 @@ export async function POST(req: NextRequest) {
     });
 
     if (payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim())) {
-      const fullLine = `رقم الترخيص : ${payload.licenseNumber}`;
+      // في RTL، استخدم النقطتين العربيتين ៖ والترتيب الطبيعي عربيًا
+      const fullLine = `رقم الترخيص：${payload.licenseNumber}`;
       doc.font(fontArBold).fontSize(12);
       const lineW = doc.widthOfString(fullLine);
       const startXLic = rightCenterX - lineW / 2;
       drawTextAr(fullLine, startXLic, footerY + 165, {
-        align: "left",
+        align: "center",
         weight: "bold",
         fontSize: 12,
         color: "#000000",

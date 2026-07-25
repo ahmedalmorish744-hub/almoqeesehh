@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Toaster } from "@/components/ui/toaster";
 import { useToast } from "@/hooks/use-toast";
 import {
   ClipboardPaste,
@@ -26,6 +25,11 @@ import {
   ExternalLink,
   Save,
   Info,
+  Search,
+  Database,
+  RefreshCw,
+  History,
+  ArrowLeftRight,
 } from "lucide-react";
 import {
   FIELDS,
@@ -37,6 +41,8 @@ import {
 import {
   parseBotMessage,
   normalizeDateToDDMMYYYY,
+  toDateInputValue,
+  toTimeInputValue,
   toTimeDisplay,
   calculateDays,
   generateLeaveId,
@@ -68,23 +74,53 @@ interface ActionState {
   pdfMessage?: string;
   uploadMessage?: string;
   leaveId?: string;
+  recordId?: number;
 }
 
 const INITIAL_ACTION: ActionState = { pdf: "idle", upload: "idle" };
 
+// =================================================================
+//  Utility: convert a database record back into form data
+// =================================================================
+function recordToForm(r: any): LeaveFormData {
+  return {
+    patient_name_ar: r.nameAr || "",
+    patient_name_en: r.nameEn || "",
+    id_number: r.identityNumber || "",
+    nationality_ar: r.nationalityAr || "",
+    nationality_en: r.nationalityEn || "",
+    employer_ar: r.employer || "",
+    employer_en: r.employerEn || "",
+    doctor_name_ar: r.doctorNameAr || "",
+    doctor_name_en: r.doctorNameEn || "",
+    position_ar: r.doctorSpecialtyAr || "",
+    position_en: r.doctorSpecialtyEn || "",
+    admission_date_gregorian: toDateInputValue(r.dateFrom) || r.dateFrom || "",
+    discharge_date_gregorian: toDateInputValue(r.dateTo) || r.dateTo || "",
+    hospital_name_ar: r.hospitalNameAr || "",
+    hospital_name_en: r.hospitalNameEn || "",
+    license_number: r.licenseNumber || "",
+    time: toTimeInputValue(r.timeFrom) || r.timeFrom || "",
+  };
+}
+
 export default function Home() {
   const { toast } = useToast();
+  const [activeTab, setActiveTab] = useState<"new" | "inquiry">("new");
+
+  // --- Form state ---
   const [formData, setFormData] = useState<LeaveFormData>({ ...EMPTY_FORM });
   const [pasteText, setPasteText] = useState("");
   const [pasteStats, setPasteStats] = useState<{ matched: number; total: number } | null>(null);
   const [action, setAction] = useState<ActionState>(INITIAL_ACTION);
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isMounted, setIsMounted] = useState(false);
 
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
+  // --- Inquiry state ---
+  const [searchMode, setSearchMode] = useState<"gsl" | "id" | "q">("gsl");
+  const [searchValue, setSearchValue] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [records, setRecords] = useState<any[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
 
   const isBusy = action.pdf === "loading" || action.upload === "loading";
 
@@ -114,10 +150,7 @@ export default function Home() {
 
   const handleLoadSample = () => {
     setPasteText(SAMPLE_MESSAGE);
-    toast({
-      title: "تم تحميل مثال",
-      description: "اضغط (تعبئة تلقائية) لتحويله إلى حقول النموذج.",
-    });
+    toast({ title: "تم تحميل مثال", description: "اضغط (تعبئة تلقائية) لتحويله إلى حقول النموذج." });
   };
 
   const handleClearAll = () => {
@@ -129,10 +162,7 @@ export default function Home() {
       URL.revokeObjectURL(pdfBlobUrl);
       setPdfBlobUrl(null);
     }
-    toast({
-      title: "تم مسح كل البيانات",
-      description: "أصبح النموذج جاهزاً لإدخال جديد.",
-    });
+    toast({ title: "تم مسح كل البيانات", description: "أصبح النموذج جاهزاً لإدخال جديد." });
   };
 
   // --- Save / Load to localStorage ---
@@ -140,7 +170,7 @@ export default function Home() {
     try {
       localStorage.setItem("seha-leave-draft", JSON.stringify(formData));
       toast({ title: "تم الحفظ", description: "حُفظت المسودة في المتصفح." });
-    } catch (e) {
+    } catch {
       toast({ title: "فشل الحفظ", variant: "destructive" });
     }
   };
@@ -176,12 +206,14 @@ export default function Home() {
   const computed = useMemo(() => {
     const admissionDisp = normalizeDateToDDMMYYYY(formData.admission_date_gregorian);
     const dischargeDisp = normalizeDateToDDMMYYYY(formData.discharge_date_gregorian);
-    const days = formData.admission_date_gregorian && formData.discharge_date_gregorian
-      ? calculateDays(formData.admission_date_gregorian, formData.discharge_date_gregorian)
-      : 0;
-    const leaveId = formData.id_number && formData.admission_date_gregorian && formData.discharge_date_gregorian
-      ? generateLeaveId(formData.id_number, formData.admission_date_gregorian, formData.discharge_date_gregorian)
-      : "—";
+    const days =
+      formData.admission_date_gregorian && formData.discharge_date_gregorian
+        ? calculateDays(formData.admission_date_gregorian, formData.discharge_date_gregorian)
+        : 0;
+    const leaveId =
+      formData.id_number && formData.admission_date_gregorian && formData.discharge_date_gregorian
+        ? generateLeaveId(formData.id_number, formData.admission_date_gregorian, formData.discharge_date_gregorian)
+        : "—";
     return { admissionDisp, dischargeDisp, days, leaveId, timeDisp: toTimeDisplay(formData.time) };
   }, [formData]);
 
@@ -196,14 +228,12 @@ export default function Home() {
       return;
     }
 
-    // Reset state
     if (pdfBlobUrl) {
       URL.revokeObjectURL(pdfBlobUrl);
       setPdfBlobUrl(null);
     }
     setAction({ pdf: "loading", upload: "loading" });
 
-    // Fire both requests in parallel
     const pdfPromise = (async () => {
       try {
         const resp = await fetch("/api/generate-pdf", {
@@ -218,7 +248,6 @@ export default function Home() {
         const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
         setPdfBlobUrl(url);
-        // Auto-open PDF in new tab
         if (typeof window !== "undefined") {
           window.open(url, "_blank");
         }
@@ -237,11 +266,11 @@ export default function Home() {
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || !data.success) {
-          return { ok: false, message: data?.message || `HTTP ${resp.status}`, leaveId: data?.leave_id };
+          return { ok: false, message: data?.message || `HTTP ${resp.status}`, leaveId: data?.leave_id, recordId: data?.record_id };
         }
-        return { ok: true, message: data.message || "تم رفع البيانات إلى منصة صحة", leaveId: data.leave_id };
+        return { ok: true, message: data.message || "تم حفظ البيانات في Vercel Postgres", leaveId: data.leave_id, recordId: data.record_id };
       } catch (e: any) {
-        return { ok: false, message: e?.message || "فشل رفع البيانات" };
+        return { ok: false, message: e?.message || "فشل حفظ البيانات" };
       }
     })();
 
@@ -252,30 +281,31 @@ export default function Home() {
       upload: uploadRes.ok ? "success" : "error",
       pdfMessage: pdfRes.message,
       uploadMessage: uploadRes.message,
-      leaveId: uploadRes.leaveId || pdfRes.ok ? computed.leaveId : undefined,
+      leaveId: uploadRes.leaveId || (pdfRes.ok ? computed.leaveId : undefined),
+      recordId: uploadRes.recordId,
     });
 
     if (pdfRes.ok && uploadRes.ok) {
       toast({
         title: "تم بنجاح",
-        description: "طُبع ملف PDF ورُفعت البيانات إلى منصة صحة.",
+        description: "طُبع ملف PDF وحُفظت البيانات في قاعدة بيانات Vercel Postgres.",
       });
     } else if (pdfRes.ok) {
       toast({
-        title: "تم الطباعة، فشل الرفع",
+        title: "تم الطباعة، فشل الحفظ",
         description: uploadRes.message,
         variant: "destructive",
       });
     } else if (uploadRes.ok) {
       toast({
-        title: "تم الرفع، فشل الطباعة",
+        title: "تم الحفظ، فشل الطباعة",
         description: pdfRes.message,
         variant: "destructive",
       });
     } else {
       toast({
         title: "فشل العمليتان",
-        description: `PDF: ${pdfRes.message} | رفع: ${uploadRes.message}`,
+        description: `PDF: ${pdfRes.message} | حفظ: ${uploadRes.message}`,
         variant: "destructive",
       });
     }
@@ -287,6 +317,54 @@ export default function Home() {
     }
   };
 
+  // --- Inquiry ---
+  const handleSearch = useCallback(async () => {
+    if (!searchValue.trim()) {
+      toast({ title: "أدخل قيمة للبحث", variant: "destructive" });
+      return;
+    }
+    setSearching(true);
+    setHasSearched(true);
+    try {
+      const params = new URLSearchParams();
+      params.set(searchMode, searchValue.trim());
+      const resp = await fetch(`/api/inquire?${params.toString()}`);
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data?.message || "فشل البحث");
+      }
+      setRecords(data.records || []);
+      toast({
+        title: `تم العثور على ${data.count} سجل`,
+        description: data.count === 0 ? "لا توجد نتائج مطابقة." : "اضغط على أي سجل لتحميله في النموذج.",
+      });
+    } catch (e: any) {
+      setRecords([]);
+      toast({
+        title: "فشل البحث",
+        description: e?.message || "خطأ في الاستعلام",
+        variant: "destructive",
+      });
+    } finally {
+      setSearching(false);
+    }
+  }, [searchMode, searchValue, toast]);
+
+  const handleLoadRecord = (r: any) => {
+    const form = recordToForm(r);
+    setFormData(form);
+    setActiveTab("new");
+    setAction(INITIAL_ACTION);
+    if (pdfBlobUrl) {
+      URL.revokeObjectURL(pdfBlobUrl);
+      setPdfBlobUrl(null);
+    }
+    toast({
+      title: "تم تحميل السجل",
+      description: `سجل ${r.gslCode} محمّل في النموذج. يمكنك تعديله أو إعادة طباعته.`,
+    });
+  };
+
   // Group fields
   const grouped = useMemo(() => {
     const g: Record<string, FieldMeta[]> = { patient: [], leave: [], doctor: [], hospital: [] };
@@ -296,7 +374,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-sky-50 via-white to-white">
-      {/* ===== Top banner ===== */}
       <header className="bg-gradient-to-l from-[#2c3e77] via-[#306db5] to-[#2c3e77] text-white shadow-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -310,227 +387,341 @@ export default function Home() {
                 منصة إصدار تقرير الإجازة المرضية
               </h1>
               <p className="text-xs sm:text-sm text-white/80">
-                صفحة إدخال بيانات — تطبع ملف PDF وترفع البيانات إلى منصة صحة في نفس الوقت
+                صفحة إدخال بيانات — تطبع ملف PDF وتحفظ البيانات في قاعدة Vercel Postgres
               </p>
             </div>
           </div>
           <div className="hidden sm:flex items-center gap-2 text-xs text-white/70">
             <Badge className="bg-white/20 text-white border-white/30 hover:bg-white/30">
-              Vercel-ready
+              Vercel-only
             </Badge>
             <Badge className="bg-white/20 text-white border-white/30 hover:bg-white/30">
-              نسخة بديلة عن البوت
+              Vercel Postgres
             </Badge>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6">
-        {/* ===== Smart Paste Card ===== */}
-        <Card className="border-2 border-[#306db5]/30 shadow-sm">
-          <CardHeader className="bg-[#306db5]/5 border-b border-[#306db5]/15">
-            <CardTitle className="flex items-center gap-2 text-[#2c3e77]">
-              <ClipboardPaste className="w-5 h-5" />
-              الصندوق الذكي — لصق الاستمارة وتعبئة تلقائية
-            </CardTitle>
-            <CardDescription>
-              الصق هنا نص الاستمارة التي كان يستخدمها البوت (بنفس الصيغة التي تحتوي على الرموز التعبيرية
-              👤 🆔 🌍 🏢 👨‍⚕️ 💼 📅 🏥 🔢 ⏰)، ثم اضغط (تعبئة تلقائية) فتُملأ الحقول تلقائياً في الأسفل.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="pt-4 space-y-3">
-            <Textarea
-              dir="rtl"
-              value={pasteText}
-              onChange={(e) => {
-                setPasteText(e.target.value);
-                setPasteStats(null);
-              }}
-              placeholder={SAMPLE_MESSAGE}
-              className="min-h-[200px] font-mono text-sm leading-6 bg-white"
-            />
-            {pasteStats && (
-              <Alert className="bg-emerald-50 border-emerald-200 text-emerald-900">
-                <CheckCircle2 className="w-4 h-4" />
-                <AlertTitle>تمت التعبئة</AlertTitle>
-                <AlertDescription>
-                  حُددت <strong>{pasteStats.matched}</strong> من <strong>{pasteStats.total}</strong> حقلاً.
-                  راجع الحقول بالأسفل وعدّلها إن لزم، ثم اضغط (طباعة PDF + رفع البيانات).
-                </AlertDescription>
-              </Alert>
-            )}
-          </CardContent>
-          <CardFooter className="flex flex-wrap items-center gap-2 border-t pt-4 bg-[#306db5]/5">
-            <Button
-              onClick={handleSmartPaste}
-              className="bg-[#306db5] hover:bg-[#285d9e] text-white"
-              disabled={isBusy}
-            >
-              <Wand2 className="w-4 h-4 ml-1" />
-              تعبئة تلقائية
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleLoadSample}
-              disabled={isBusy}
-            >
-              <Eye className="w-4 h-4 ml-1" />
-              تحميل مثال
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setPasteText("");
-                setPasteStats(null);
-              }}
-              disabled={isBusy}
-            >
-              مسح الصندوق
-            </Button>
-          </CardFooter>
-        </Card>
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="space-y-6">
+          <TabsList className="grid w-full grid-cols-2 max-w-md mx-auto">
+            <TabsTrigger value="new" className="flex items-center gap-2">
+              <FileText className="w-4 h-4" />
+              إصدار إجازة جديدة
+            </TabsTrigger>
+            <TabsTrigger value="inquiry" className="flex items-center gap-2">
+              <History className="w-4 h-4" />
+              الإجازات السابقة
+            </TabsTrigger>
+          </TabsList>
 
-        {/* ===== Form Card ===== */}
-        <Card className="shadow-sm">
-          <CardHeader className="bg-slate-50 border-b">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-[#2c3e77]">حقول الاستمارة</CardTitle>
+          {/* ====================================================== */}
+          {/*  TAB 1: New leave                                      */}
+          {/* ====================================================== */}
+          <TabsContent value="new" className="space-y-6">
+            {/* Smart paste */}
+            <Card className="border-2 border-[#306db5]/30 shadow-sm">
+              <CardHeader className="bg-[#306db5]/5 border-b border-[#306db5]/15">
+                <CardTitle className="flex items-center gap-2 text-[#2c3e77]">
+                  <ClipboardPaste className="w-5 h-5" />
+                  الصندوق الذكي — لصق الاستمارة وتعبئة تلقائية
+                </CardTitle>
                 <CardDescription>
-                  عدّل أي حقل يدوياً بعد التعبئة التلقائية أو أدخل البيانات من الصفر.
+                  الصق هنا نص الاستمارة التي كان يستخدمها البوت (بنفس الصيغة التي تحتوي على الرموز التعبيرية
+                  👤 🆔 🌍 🏢 👨‍⚕️ 💼 📅 🏥 🔢 ⏰)، ثم اضغط (تعبئة تلقائية) فتُملأ الحقول تلقائياً في الأسفل.
                 </CardDescription>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={handleSaveDraft} disabled={isBusy}>
-                  <Save className="w-4 h-4 ml-1" />
-                  حفظ مسودة
-                </Button>
-                <Button variant="outline" size="sm" onClick={handleLoadDraft} disabled={isBusy}>
-                  <RotateCcw className="w-4 h-4 ml-1" />
-                  استرجاع مسودة
-                </Button>
-                <Button variant="ghost" size="sm" onClick={handleClearAll} disabled={isBusy}>
-                  <RotateCcw className="w-4 h-4 ml-1" />
-                  مسح الكل
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-6 space-y-6">
-            {/* Computed summary */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <SummaryTile label="رمز الإجازة" value={computed.leaveId} />
-              <SummaryTile label="عدد الأيام" value={String(computed.days)} />
-              <SummaryTile label="تاريخ الدخول" value={computed.admissionDisp || "—"} />
-              <SummaryTile label="تاريخ الخروج" value={computed.dischargeDisp || "—"} />
-            </div>
-
-            {(["patient", "leave", "doctor", "hospital"] as const).map((groupKey) => (
-              <section key={groupKey} className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary" className="text-[#2c3e77] bg-[#306db5]/10">
-                    {GROUP_LABELS[groupKey].icon} {GROUP_LABELS[groupKey].ar}
-                  </Badge>
-                  <Separator className="flex-1 bg-slate-200" />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {grouped[groupKey].map((field) => (
-                    <FieldInput
-                      key={field.key}
-                      field={field}
-                      value={formData[field.key]}
-                      onChange={(v) => updateField(field.key, v)}
-                      disabled={isBusy}
-                    />
-                  ))}
-                </div>
-              </section>
-            ))}
-          </CardContent>
-        </Card>
-
-        {/* ===== Action Card ===== */}
-        <Card className="border-2 border-[#306db5]/40 shadow-md">
-          <CardHeader className="bg-gradient-to-l from-[#306db5]/10 to-transparent border-b">
-            <CardTitle className="text-[#2c3e77] flex items-center gap-2">
-              <Printer className="w-5 h-5" />
-              طباعة التقرير ورفع البيانات
-            </CardTitle>
-            <CardDescription>
-              بضغطة واحدة: يُولَّد ملف PDF ويُفتح للطباعة، وترتفع البيانات إلى خادم منصة صحة في نفس اللحظة.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="pt-6 space-y-4">
-            {!isValid && (
-              <Alert variant="destructive">
-                <Info className="w-4 h-4" />
-                <AlertTitle>حقول مطلوبة</AlertTitle>
-                <AlertDescription>
-                  يرجى تعبئة الحقول التالية قبل الطباعة: {validation.join("، ")}.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <StatusBlock
-                title="حالة الطباعة (PDF)"
-                status={action.pdf}
-                message={action.pdfMessage}
-                icon={<FileText className="w-5 h-5" />}
-                onAction={
-                  action.pdf === "success" && pdfBlobUrl
-                    ? { label: "فتح PDF مجدداً", onClick: handlePrintAgain }
-                    : undefined
-                }
-              />
-              <StatusBlock
-                title="حالة الرفع (Railway)"
-                status={action.upload}
-                message={action.uploadMessage}
-                icon={<UploadCloud className="w-5 h-5" />}
-                extra={
-                  action.leaveId && action.upload !== "idle"
-                    ? `رمز الإجازة: ${action.leaveId}`
-                    : undefined
-                }
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 pt-2">
-              <Button
-                onClick={handlePrintAndUpload}
-                disabled={!isValid || isBusy}
-                className="bg-[#2c3e77] hover:bg-[#243559] text-white text-base h-12 px-6"
-              >
-                {isBusy ? (
-                  <>
-                    <Loader2 className="w-5 h-5 ml-2 animate-spin" />
-                    جارٍ الطباعة والرفع...
-                  </>
-                ) : (
-                  <>
-                    <Printer className="w-5 h-5 ml-2" />
-                    طباعة PDF + رفع البيانات
-                  </>
+              </CardHeader>
+              <CardContent className="pt-4 space-y-3">
+                <Textarea
+                  dir="rtl"
+                  value={pasteText}
+                  onChange={(e) => {
+                    setPasteText(e.target.value);
+                    setPasteStats(null);
+                  }}
+                  placeholder={SAMPLE_MESSAGE}
+                  className="min-h-[200px] font-mono text-sm leading-6 bg-white"
+                />
+                {pasteStats && (
+                  <Alert className="bg-emerald-50 border-emerald-200 text-emerald-900">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <AlertTitle>تمت التعبئة</AlertTitle>
+                    <AlertDescription>
+                      حُددت <strong>{pasteStats.matched}</strong> من <strong>{pasteStats.total}</strong> حقلاً.
+                      راجع الحقول بالأسفل وعدّلها إن لزم، ثم اضغط (طباعة PDF + حفظ البيانات).
+                    </AlertDescription>
+                  </Alert>
                 )}
-              </Button>
-              {pdfBlobUrl && (
-                <Button variant="outline" asChild>
-                  <a href={pdfBlobUrl} download={`sick_leave_${computed.leaveId}.pdf`} target="_blank" rel="noreferrer">
-                    <ExternalLink className="w-4 h-4 ml-1" />
-                    تنزيل ملف PDF
-                  </a>
+              </CardContent>
+              <CardFooter className="flex flex-wrap items-center gap-2 border-t pt-4 bg-[#306db5]/5">
+                <Button onClick={handleSmartPaste} className="bg-[#306db5] hover:bg-[#285d9e] text-white" disabled={isBusy}>
+                  <Wand2 className="w-4 h-4 ml-1" />
+                  تعبئة تلقائية
                 </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                <Button variant="outline" onClick={handleLoadSample} disabled={isBusy}>
+                  <Eye className="w-4 h-4 ml-1" />
+                  تحميل مثال
+                </Button>
+                <Button variant="ghost" onClick={() => { setPasteText(""); setPasteStats(null); }} disabled={isBusy}>
+                  مسح الصندوق
+                </Button>
+              </CardFooter>
+            </Card>
+
+            {/* Form */}
+            <Card className="shadow-sm">
+              <CardHeader className="bg-slate-50 border-b">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-[#2c3e77]">حقول الاستمارة</CardTitle>
+                    <CardDescription>
+                      عدّل أي حقل يدوياً بعد التعبئة التلقائية أو أدخل البيانات من الصفر.
+                    </CardDescription>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={handleSaveDraft} disabled={isBusy}>
+                      <Save className="w-4 h-4 ml-1" />
+                      حفظ مسودة
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={handleLoadDraft} disabled={isBusy}>
+                      <RotateCcw className="w-4 h-4 ml-1" />
+                      استرجاع مسودة
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={handleClearAll} disabled={isBusy}>
+                      <RotateCcw className="w-4 h-4 ml-1" />
+                      مسح الكل
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-6 space-y-6">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <SummaryTile label="رمز الإجازة" value={computed.leaveId} />
+                  <SummaryTile label="عدد الأيام" value={String(computed.days)} />
+                  <SummaryTile label="تاريخ الدخول" value={computed.admissionDisp || "—"} />
+                  <SummaryTile label="تاريخ الخروج" value={computed.dischargeDisp || "—"} />
+                </div>
+
+                {(["patient", "leave", "doctor", "hospital"] as const).map((groupKey) => (
+                  <section key={groupKey} className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[#2c3e77] bg-[#306db5]/10">
+                        {GROUP_LABELS[groupKey].icon} {GROUP_LABELS[groupKey].ar}
+                      </Badge>
+                      <Separator className="flex-1 bg-slate-200" />
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {grouped[groupKey].map((field) => (
+                        <FieldInput
+                          key={field.key}
+                          field={field}
+                          value={formData[field.key]}
+                          onChange={(v) => updateField(field.key, v)}
+                          disabled={isBusy}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </CardContent>
+            </Card>
+
+            {/* Action */}
+            <Card className="border-2 border-[#306db5]/40 shadow-md">
+              <CardHeader className="bg-gradient-to-l from-[#306db5]/10 to-transparent border-b">
+                <CardTitle className="text-[#2c3e77] flex items-center gap-2">
+                  <Printer className="w-5 h-5" />
+                  طباعة التقرير وحفظ البيانات
+                </CardTitle>
+                <CardDescription>
+                  بضغطة واحدة: يُولَّد ملف PDF ويُفتح للطباعة، وتُحفظ البيانات في قاعدة Vercel Postgres في نفس اللحظة.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pt-6 space-y-4">
+                {!isValid && (
+                  <Alert variant="destructive">
+                    <Info className="w-4 h-4" />
+                    <AlertTitle>حقول مطلوبة</AlertTitle>
+                    <AlertDescription>
+                      يرجى تعبئة الحقول التالية قبل الطباعة: {validation.join("، ")}.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <StatusBlock
+                    title="حالة الطباعة (PDF)"
+                    status={action.pdf}
+                    message={action.pdfMessage}
+                    icon={<FileText className="w-5 h-5" />}
+                    onAction={
+                      action.pdf === "success" && pdfBlobUrl
+                        ? { label: "فتح PDF مجدداً", onClick: handlePrintAgain }
+                        : undefined
+                    }
+                  />
+                  <StatusBlock
+                    title="حالة الحفظ (Vercel Postgres)"
+                    status={action.upload}
+                    message={action.uploadMessage}
+                    icon={<Database className="w-5 h-5" />}
+                    extra={
+                      action.leaveId && action.upload !== "idle"
+                        ? `رمز الإجازة: ${action.leaveId}`
+                        : undefined
+                    }
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <Button
+                    onClick={handlePrintAndUpload}
+                    disabled={!isValid || isBusy}
+                    className="bg-[#2c3e77] hover:bg-[#243559] text-white text-base h-12 px-6"
+                  >
+                    {isBusy ? (
+                      <>
+                        <Loader2 className="w-5 h-5 ml-2 animate-spin" />
+                        جارٍ الطباعة والحفظ...
+                      </>
+                    ) : (
+                      <>
+                        <Printer className="w-5 h-5 ml-2" />
+                        طباعة PDF + حفظ البيانات
+                      </>
+                    )}
+                  </Button>
+                  {pdfBlobUrl && (
+                    <Button variant="outline" asChild>
+                      <a href={pdfBlobUrl} download={`sick_leave_${computed.leaveId}.pdf`} target="_blank" rel="noreferrer">
+                        <ExternalLink className="w-4 h-4 ml-1" />
+                        تنزيل ملف PDF
+                      </a>
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* ====================================================== */}
+          {/*  TAB 2: Inquiry / past records                         */}
+          {/* ====================================================== */}
+          <TabsContent value="inquiry" className="space-y-6">
+            <Card className="shadow-sm">
+              <CardHeader className="bg-slate-50 border-b">
+                <CardTitle className="flex items-center gap-2 text-[#2c3e77]">
+                  <Search className="w-5 h-5" />
+                  البحث في الإجازات السابقة
+                </CardTitle>
+                <CardDescription>
+                  ابحث في قاعدة بيانات Vercel Postgres عن الإجازات المرضية السابقة. يمكنك البحث برمز الإجازة
+                  (GSL) أو رقم الهوية أو نص حر.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pt-6 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-[auto_1fr_auto] gap-3 items-end">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">نوع البحث</Label>
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm"
+                        variant={searchMode === "gsl" ? "default" : "outline"}
+                        onClick={() => setSearchMode("gsl")}
+                        className={searchMode === "gsl" ? "bg-[#306db5] hover:bg-[#285d9e]" : ""}
+                      >
+                        رمز الإجازة
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={searchMode === "id" ? "default" : "outline"}
+                        onClick={() => setSearchMode("id")}
+                        className={searchMode === "id" ? "bg-[#306db5] hover:bg-[#285d9e]" : ""}
+                      >
+                        رقم الهوية
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={searchMode === "q" ? "default" : "outline"}
+                        onClick={() => setSearchMode("q")}
+                        className={searchMode === "q" ? "bg-[#306db5] hover:bg-[#285d9e]" : ""}
+                      >
+                        نص حر
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="search-value" className="text-xs">قيمة البحث</Label>
+                    <Input
+                      id="search-value"
+                      dir="ltr"
+                      value={searchValue}
+                      onChange={(e) => setSearchValue(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                      placeholder={
+                        searchMode === "gsl"
+                          ? "GSL20251234567"
+                          : searchMode === "id"
+                          ? "828287654"
+                          : "عبدالله أو GSL أو رقم الهوية..."
+                      }
+                    />
+                  </div>
+                  <Button onClick={handleSearch} disabled={searching} className="bg-[#2c3e77] hover:bg-[#243559] h-10">
+                    {searching ? <Loader2 className="w-4 h-4 ml-2 animate-spin" /> : <Search className="w-4 h-4 ml-2" />}
+                    بحث
+                  </Button>
+                </div>
+
+                {/* Results */}
+                {hasSearched && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>عدد النتائج: {records.length}</span>
+                      <Button variant="ghost" size="sm" onClick={handleSearch} disabled={searching}>
+                        <RefreshCw className="w-3 h-3 ml-1" />
+                        تحديث
+                      </Button>
+                    </div>
+
+                    {records.length === 0 ? (
+                      <Alert>
+                        <Info className="w-4 h-4" />
+                        <AlertTitle>لا توجد نتائج</AlertTitle>
+                        <AlertDescription>
+                          لم يتم العثور على سجلات مطابقة. جرّب قيمة بحث أخرى أو تغيير نوع البحث.
+                        </AlertDescription>
+                      </Alert>
+                    ) : (
+                      <div className="space-y-2 max-h-[600px] overflow-y-auto pl-1">
+                        {records.map((r) => (
+                          <RecordCard key={r.id} record={r} onLoad={() => handleLoadRecord(r)} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!hasSearched && (
+                  <Alert className="bg-[#306db5]/5 border-[#306db5]/20">
+                    <Database className="w-4 h-4" />
+                    <AlertTitle>قاعدة البيانات جاهزة</AlertTitle>
+                    <AlertDescription>
+                      ابحث برمز الإجازة GSL (الأكثر دقة)، أو برقم الهوية (لعرض كل إجازات نفس المريض)،
+                      أو بنص حر في الأسماء والأرقام. عند النقر على أي نتيجة، يُحمَّل السجل في النموذج لتعديله
+                      أو إعادة طباعته.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </main>
 
       <footer className="border-t bg-slate-50 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 text-center text-xs text-slate-500">
-          منصة إصدار تقرير الإجازة المرضية — بديل صفحة الويب عن بوت Telegram.
-          جاهز للنشر على Vercel.
+          منصة إصدار تقرير الإجازة المرضية — تعمل بالكامل على Vercel (Next.js + Vercel Postgres).
         </div>
       </footer>
     </div>
@@ -632,6 +823,52 @@ function StatusBlock({
             </Button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function RecordCard({ record, onLoad }: { record: any; onLoad: () => void }) {
+  const created = record.createdAt ? new Date(record.createdAt).toLocaleString("ar-SA") : "";
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4 hover:border-[#306db5] hover:shadow-sm transition-all">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="space-y-1 min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Badge className="bg-[#2c3e77] text-white">{record.gslCode}</Badge>
+            <span className="font-bold text-slate-800">{record.nameAr}</span>
+            {record.nameEn && <span className="text-xs text-slate-500">({record.nameEn})</span>}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-slate-600 mt-2">
+            <div>
+              <div className="text-slate-400">رقم الهوية</div>
+              <div className="font-mono" dir="ltr">{record.identityNumber}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">الدخول</div>
+              <div dir="ltr">{record.dateFrom}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">الخروج</div>
+              <div dir="ltr">{record.dateTo}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">عدد الأيام</div>
+              <div>{record.dayCount}</div>
+            </div>
+          </div>
+          {record.hospitalNameAr && (
+            <div className="text-xs text-slate-600 mt-1">
+              🏥 {record.hospitalNameAr}
+              {record.doctorNameAr && <> · 👨‍⚕️ {record.doctorNameAr}</>}
+            </div>
+          )}
+          {created && <div className="text-[10px] text-slate-400 mt-1">أُنشئ في: {created}</div>}
+        </div>
+        <Button onClick={onLoad} size="sm" variant="outline" className="shrink-0">
+          <ArrowLeftRight className="w-4 h-4 ml-1" />
+          تحميل في النموذج
+        </Button>
       </div>
     </div>
   );

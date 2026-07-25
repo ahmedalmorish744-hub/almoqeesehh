@@ -1,23 +1,13 @@
-/**
- * وحدة قاعدة البيانات — تستخدم Vercel Postgres مباشرة.
- * تعمل بنفس الكود محلياً (إذا وفّرت POSTGRES_URL) وعلى Vercel.
- *
- * الجداول الخمسة:
- *   users, nationalities, hospitals, doctors, sick_leaves
- *
- * ملاحظة: عند أول نشر على Vercel، شغّل `bun run db:init` محلياً بعد ضبط
- * متغيرات البيئة، أو افتح Vercel Postgres Console ونفّذ schema.sql يدوياً.
- */
+-- ============================================================
+--  سكيمة قاعدة بيانات Vercel Postgres
+--  Schema for Vercel Postgres — Sick Leave Records
+-- ============================================================
+--  يمكن تنفيذ هذا الملف يدوياً من Vercel Dashboard:
+--    Storage → قاعدة البيانات → Query → الصق المحتوى → Run
+--  أو من سطر الأوامر:
+--    psql "$POSTGRES_URL" -f schema.sql
+-- ============================================================
 
-import { sql } from "@vercel/postgres";
-
-export { sql };
-
-// =================================================================
-//  SQL SCHEMA — يُنفَّذ مرة واحدة عند تهيئة قاعدة البيانات
-// =================================================================
-
-export const SCHEMA_SQL = `
 -- Users
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
@@ -103,67 +93,10 @@ CREATE TABLE IF NOT EXISTS sick_leaves (
 CREATE INDEX IF NOT EXISTS idx_sick_leaves_gsl ON sick_leaves(gsl_code);
 CREATE INDEX IF NOT EXISTS idx_sick_leaves_identity ON sick_leaves(identity_number);
 CREATE INDEX IF NOT EXISTS idx_sick_leaves_name ON sick_leaves(name_ar);
-`;
 
-/**
- * يُنفّذ schema.sql على قاعدة البيانات — يُستدعى مرة واحدة عند الإعداد.
- * آمن للاستدعاء المتكرر (CREATE TABLE IF NOT EXISTS).
- */
-export async function initDatabase(): Promise<void> {
-  await sql.query(SCHEMA_SQL);
-  console.log("[db] Schema initialized successfully");
-}
-
-// =================================================================
-//  Helpers
-// =================================================================
-
-export function emptyToNull(s: string | undefined | null): string | null {
-  if (s === undefined || s === null) return null;
-  const t = s.trim();
-  const emptyIndicators = new Set([
-    "",
-    "غير محدد",
-    "فارغ",
-    "-",
-    "None",
-    "none",
-    "null",
-    "NULL",
-    "Not Specified",
-    "N/A",
-    "n/a",
-    "undefined",
-  ]);
-  return emptyIndicators.has(t) ? null : t;
-}
-
-// =================================================================
-//  Types
-// =================================================================
-
-export interface SickLeaveRecord {
-  id: number;
-  gsl_code: string;
-  identity_number: string;
-  name_ar: string;
-  name_en: string | null;
-  date_from: string;
-  date_to: string;
-  day_count: number;
-  issue_date: string | null;
-  time_from: string | null;
-  nationality_ar: string | null;
-  nationality_en: string | null;
-  employer: string | null;
-  employer_en: string | null;
-  doctor_name_ar: string | null;
-  doctor_name_en: string | null;
-  doctor_specialty_ar: string | null;
-  doctor_specialty_en: string | null;
-  hospital_name_ar: string | null;
-  hospital_name_en: string | null;
-  license_number: string | null;
-  leave_type: string;
-  created_at: string;
-}
+-- ============================================================
+--  مستخدم افتراضي للسجلات القادمة من صفحة الويب
+-- ============================================================
+INSERT INTO users (username, password, role, is_active)
+VALUES ('web_user', 'web_internal_default', 'admin', TRUE)
+ON CONFLICT (username) DO NOTHING;
