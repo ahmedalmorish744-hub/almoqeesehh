@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "next build",
+  "devCommand": "next dev",
+  "installCommand": "bun install",
+  "regions": ["sin1"],
+  "functions": {
+    "src/app/api/generate-pdf/route.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "src/app/api/upload-leave/route.ts": {
+      "maxDuration": 30,
+      "memory": 512
+    }
+  }
+}

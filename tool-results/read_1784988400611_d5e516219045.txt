@@ -1,0 +1,917 @@
+     1→const express = require('express');
+     2→const cors = require('cors');
+     3→const bodyParser = require('body-parser');
+     4→const db = require('./db');
+     5→const mapping = require('./mappings');
+     6→const bcrypt = require('bcryptjs');
+     7→const jwt = require('jsonwebtoken');
+     8→const multer = require('multer');
+     9→const path = require('path');
+    10→const fs = require('fs');
+    11→const { generateCompanionReport } = require('./utils/reportGenerator');
+    12→const { generateSickLeaveReport } = require('./utils/sickLeaveReportGenerator');
+    13→const { toHijri } = require('./utils/dateUtils');
+    14→
+    15→const app = express();
+    16→const PORT = process.env.PORT || 3000;
+    17→const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here'; // Move to .env
+    18→
+    19→app.use(cors({
+    20→    origin: true, // Reflects the request origin, effectively allowing all
+    21→    credentials: true,
+    22→    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    23→    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+    24→    exposedHeaders: ['Content-Disposition']
+    25→}));
+    26→app.use(bodyParser.json());
+    27→app.use('/uploads', express.static('uploads'));
+    28→app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
+    29→app.use(express.urlencoded({ extended: true })); // For parsing form data
+    30→
+    31→// Root route - redirect to inquiry page
+    32→app.get('/', (req, res) => {
+    33→    res.redirect('/inquiry');
+    34→});
+    35→
+    36→// Routes
+    37→const inquiryRoute = require('./routes/inquiry');
+    38→app.use('/inquiry', inquiryRoute);
+    39→
+    40→// --- Multer Storage ---
+    41→const storage = multer.diskStorage({
+    42→    destination: (req, file, cb) => {
+    43→        const uploadPath = 'uploads/';
+    44→        if (!fs.existsSync(uploadPath)) {
+    45→            fs.mkdirSync(uploadPath);
+    46→        }
+    47→        cb(null, uploadPath);
+    48→    },
+    49→    filename: (req, file, cb) => {
+    50→        cb(null, Date.now() + path.extname(file.originalname));
+    51→    }
+    52→});
+    53→
+    54→const upload = multer({ storage: storage });
+    55→
+    56→// --- Middleware ---
+    57→
+    58→const authenticateToken = (req, res, next) => {
+    59→    const authHeader = req.headers['authorization'];
+    60→    const token = authHeader && authHeader.split(' ')[1];
+    61→
+    62→    if (!token) return res.sendStatus(401);
+    63→
+    64→    jwt.verify(token, SECRET_KEY, (err, user) => {
+    65→        if (err) {
+    66→            console.error('Authentication Error:', err.message);
+    67→            return res.status(403).json({ error: err.message }); // Send error detail to client
+    68→        }
+    69→        req.user = user;
+    70→        next();
+    71→    });
+    72→};
+    73→
+    74→const requireAdmin = (req, res, next) => {
+    75→    if (req.user && req.user.role === 'admin') {
+    76→        next();
+    77→    } else {
+    78→        res.sendStatus(403);
+    79→    }
+    80→};
+    81→
+    82→// --- Auth API ---
+    83→
+    84→app.post('/api/login', async (req, res) => {
+    85→    const { username, password } = req.body;
+    86→    try {
+    87→        const [users] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
+    88→        if (users.length === 0) {
+    89→            return res.status(401).json({ error: 'Invalid credentials' });
+    90→        }
+    91→        const user = users[0];
+    92→
+    93→        // Active Check
+    94→        if (user.is_active === 0) {
+    95→            return res.status(403).json({ error: 'Your account is disabled' });
+    96→        }
+    97→
+    98→        const validPassword = await bcrypt.compare(password, user.password);
+    99→        if (!validPassword) {
+   100→            return res.status(401).json({ error: 'Invalid credentials' });
+   101→        }
+   102→
+   103→        const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET_KEY, { expiresIn: '12h' });
+   104→        res.json({ token, role: user.role, username: user.username });
+   105→    } catch (err) {
+   106→        res.status(500).json({ error: err.message });
+   107→    }
+   108→});
+   109→
+   110→// --- Profile API (Authenticated User) ---
+   111→
+   112→app.put('/api/profile', authenticateToken, async (req, res) => {
+   113→    const { username, password } = req.body;
+   114→    try {
+   115→        let query = 'UPDATE users SET username = ?';
+   116→        let params = [username];
+   117→
+   118→        if (password) {
+   119→            const hashedPassword = await bcrypt.hash(password, 10);
+   120→            query += ', password = ?';
+   121→            params.push(hashedPassword);
+   122→        }
+   123→
+   124→        query += ' WHERE id = ?';
+   125→        params.push(req.user.id);
+   126→
+   127→        await db.query(query, params);
+   128→        res.json({ success: true });
+   129→    } catch (err) {
+   130→        res.status(500).json({ error: err.message });
+   131→    }
+   132→});
+   133→
+   134→// --- User Management API (Admin Only) ---
+   135→
+   136→app.get('/api/users', authenticateToken, requireAdmin, async (req, res) => {
+   137→    try {
+   138→        const [users] = await db.query('SELECT id, username, role, is_active, created_at FROM users');
+   139→        res.json(users);
+   140→    } catch (err) {
+   141→        res.status(500).json({ error: err.message });
+   142→    }
+   143→});
+   144→
+   145→app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
+   146→    const { username, password, role } = req.body;
+   147→    try {
+   148→        const hashedPassword = await bcrypt.hash(password, 10);
+   149→        const [result] = await db.query('INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, 1)', [username, hashedPassword, role || 'user']);
+   150→        res.json({ id: result.insertId, username, role, is_active: 1 });
+   151→    } catch (err) {
+   152→        res.status(500).json({ error: err.message });
+   153→    }
+   154→});
+   155→
+   156→app.put('/api/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+   157→    const { username, password, role, is_active } = req.body;
+   158→    try {
+   159→        let query = 'UPDATE users SET username = ?, role = ?, is_active = ?';
+   160→        let params = [username, role, is_active];
+   161→
+   162→        if (password) {
+   163→            const hashedPassword = await bcrypt.hash(password, 10);
+   164→            query += ', password = ?';
+   165→            params.push(hashedPassword);
+   166→        }
+   167→
+   168→        query += ' WHERE id = ?';
+   169→        params.push(req.params.id);
+   170→
+   171→        await db.query(query, params);
+   172→        res.json({ success: true });
+   173→    } catch (err) {
+   174→        res.status(500).json({ error: err.message });
+   175→    }
+   176→});
+   177→
+   178→app.delete('/api/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+   179→    try {
+   180→        await db.query('DELETE FROM users WHERE id = ?', [req.params.id]);
+   181→        res.json({ success: true });
+   182→    } catch (err) {
+   183→        res.status(500).json({ error: err.message });
+   184→    }
+   185→});
+   186→
+   187→
+   188→// --- Helper for Isolation ---
+   189→// If admin, can see all (OR just their own? User said "Admin control all components").
+   190→// I will interpret "control all" as seeing everything.
+   191→const applyIsolation = (query, params, user) => {
+   192→    if (user.role === 'admin') return { query, params };
+   193→
+   194→    // If query has WHERE, add AND user_id = ?
+   195→    // If not, add WHERE user_id = ?
+   196→    if (query.toLowerCase().includes('where')) {
+   197→        return { query: query + ' AND user_id = ?', params: [...params, user.id] };
+   198→    } else {
+   199→        // Handle ORDER BY or LIMIT which might be at the end
+   200→        // Simple heuristic: insert WHERE before ORDER BY or LIMIT if they exist, or at end
+   201→        const upperQ = query.toUpperCase();
+   202→        const orderIdx = upperQ.indexOf('ORDER BY');
+   203→        const limitIdx = upperQ.indexOf('LIMIT');
+   204→        const cutIdx = (orderIdx !== -1 && limitIdx !== -1) ? Math.min(orderIdx, limitIdx)
+   205→            : (orderIdx !== -1 ? orderIdx : limitIdx);
+   206→
+   207→        if (cutIdx !== -1) {
+   208→            return {
+   209→                query: query.substring(0, cutIdx) + ' WHERE user_id = ? ' + query.substring(cutIdx),
+   210→                params: [user.id, ...params]
+   211→            };
+   212→        } else {
+   213→            return { query: query + ' WHERE user_id = ?', params: [...params, user.id] };
+   214→        }
+   215→    }
+   216→};
+   217→
+   218→// Simplified: Just rewrite queries manually for clarity instead of regex magic which is prone to errors.
+   219→
+   220→// --- Patients API ---
+   221→
+   222→app.get('/manger_data/patientsall', authenticateToken, async (req, res) => {
+   223→    try {
+   224→        console.log('GET patientsall. User:', req.user.username, 'Role:', req.user.role, 'ID:', req.user.id);
+   225→        let sql = 'SELECT * FROM patients';
+   226→        let params = [];
+   227→        if (req.user.role !== 'admin') {
+   228→            sql += ' WHERE user_id = ?';
+   229→            params.push(req.user.id);
+   230→        }
+   231→        sql += ' ORDER BY created_at DESC';
+   232→
+   233→        console.log('Executing SQL:', sql);
+   234→        console.log('Params:', params);
+   235→
+   236→        const [rows] = await db.query(sql, params);
+   237→        res.json(rows.map(mapping.mapPatientToAPI));
+   238→    } catch (err) {
+   239→        console.error(err);
+   240→        res.status(500).json({ error: err.message });
+   241→    }
+   242→});
+   243→
+   244→app.get('/manger_data/user20', authenticateToken, async (req, res) => {
+   245→    try {
+   246→        let sql = 'SELECT * FROM patients';
+   247→        let params = [];
+   248→        if (req.user.role !== 'admin') {
+   249→            sql += ' WHERE user_id = ?';
+   250→            params.push(req.user.id);
+   251→        }
+   252→        sql += ' ORDER BY created_at DESC LIMIT 20';
+   253→
+   254→        const [rows] = await db.query(sql, params);
+   255→        res.json(rows.map(mapping.mapPatientToAPI));
+   256→    } catch (err) {
+   257→        console.error(err);
+   258→        res.status(500).json({ error: err.message });
+   259→    }
+   260→});
+   261→
+   262→app.get('/manger_data/patients/:id', authenticateToken, async (req, res) => {
+   263→    try {
+   264→        let sql = 'SELECT * FROM patients WHERE id = ?';
+   265→        let params = [req.params.id];
+   266→        if (req.user.role !== 'admin') {
+   267→            sql += ' AND user_id = ?';
+   268→            params.push(req.user.id);
+   269→        }
+   270→
+   271→        const [rows] = await db.query(sql, params);
+   272→        if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
+   273→        res.json(mapping.mapPatientToAPI(rows[0]));
+   274→    } catch (err) {
+   275→        res.status(500).json({ error: err.message });
+   276→    }
+   277→});
+   278→
+   279→app.post('/manger_data/patients', authenticateToken, async (req, res) => {
+   280→    try {
+   281→        const data = mapping.mapPatientFromAPI(req.body);
+   282→        data.user_id = req.user.id; // Enforce owner
+   283→
+   284→        // Auto-Generate GSL Code (GSL is now the mandatory prefix for ALL hospital types)
+   285→        if (data.hospital_id) {
+   286→            try {
+   287→                const [hospitals] = await db.query('SELECT type FROM hospitals WHERE id = ?', [data.hospital_id]);
+   288→                if (hospitals.length > 0) {
+   289→                    const hospitalType = hospitals[0].type;
+   290→                    // البادئة الإجبارية: GSL لكافة أنواع المنشآت (حكومية/خاصة/وزارة)
+   291→                    // النظام يدعم أكثر من معرف إجازة فريد - كل سجل جديد يولد GSL مختلف
+   292→                    const prefix = 'GSL';
+   293→
+   294→                    // Generate Unique Number (260 + 8 random digits) to make 11 digits total
+   295→                    // 260 + 8 digits = 11 digits
+   296→                    const randomPart = Math.floor(10000000 + Math.random() * 90000000); // 8 digits
+   297→                    const codeNumber = '260' + randomPart;
+   298→
+   299→                    data.gsl_code = prefix + codeNumber;
+   300→                    console.log(`Generated Leave Code: ${data.gsl_code} for Hospital Type: ${hospitalType}`);
+   301→                }
+   302→            } catch (codeErr) {
+   303→                console.error("Error generating leave code:", codeErr);
+   304→                // Non-blocking? Or fail? Let's log and proceed, but user might get empty code if frontend didn't send one.
+   305→            }
+   306→        }
+   307→
+   308→        // --- Calculate Hijri Dates ---
+   309→        if (data.date_from) {
+   310→            data.hijri_admission_date = toHijri(data.date_from);
+   311→        }
+   312→        if (data.date_to) {
+   313→            data.hijri_discharge_date = toHijri(data.date_to);
+   314→        }
+   315→
+   316→        const [result] = await db.query('INSERT INTO patients SET ?', data);
+   317→        const [rows] = await db.query('SELECT * FROM patients WHERE id = ?', [result.insertId]);
+   318→        res.json(mapping.mapPatientToAPI(rows[0]));
+   319→    } catch (err) {
+   320→        console.error(err);
+   321→        res.status(500).json({ error: err.message });
+   322→    }
+   323→});
+   324→
+   325→app.delete('/manger_data/patients/:id', authenticateToken, async (req, res) => {
+   326→    try {
+   327→        let sql = 'DELETE FROM patients WHERE id = ?';
+   328→        let params = [req.params.id];
+   329→        if (req.user.role !== 'admin') {
+   330→            sql += ' AND user_id = ?';
+   331→            params.push(req.user.id);
+   332→        }
+   333→        const [result] = await db.query(sql, params);
+   334→        if (result.affectedRows === 0) return res.status(404).json({ error: 'Not found or permission denied' });
+   335→
+   336→        res.json({ success: true });
+   337→    } catch (err) {
+   338→        res.status(500).json({ error: err.message });
+   339→    }
+   340→});
+   341→
+   342→app.put('/manger_data/patients/:id', authenticateToken, async (req, res) => {
+   343→    try {
+   344→        const data = mapping.mapPatientFromAPI(req.body);
+   345→        Object.keys(data).forEach(key => data[key] === undefined && delete data[key]);
+   346→        delete data.user_id; // Prevent changing owner
+   347→
+   348→        // Security Check: Only Admin can change 'prevent_inquiry'
+   349→        if (data.prevent_inquiry !== undefined) {
+   350→            if (req.user.role !== 'admin') {
+   351→                console.log(`Permission denied for user ${req.user.username} (role: ${req.user.role}). Removing prevent_inquiry.`);
+   352→                delete data.prevent_inquiry;
+   353→            }
+   354→        }
+   355→
+   356→        // --- Calculate Hijri Dates on Update ---
+   357→        if (data.date_from) {
+   358→            data.hijri_admission_date = toHijri(data.date_from);
+   359→        }
+   360→        if (data.date_to) {
+   361→            data.hijri_discharge_date = toHijri(data.date_to);
+   362→        }
+   363→
+   364→        console.log('Update Data:', data);
+   365→
+   366→        if (Object.keys(data).length === 0) {
+   367→            return res.status(400).json({ error: 'No valid fields to update or permission denied' });
+   368→        }
+   369→
+   370→        // Manual Query Construction to avoid "SET ?" issues
+   371→        const updates = [];
+   372→        const values = [];
+   373→        Object.keys(data).forEach(key => {
+   374→            updates.push(`${key} = ?`);
+   375→            values.push(data[key]);
+   376→        });
+   377→
+   378→        let sql = `UPDATE patients SET ${updates.join(', ')} WHERE id = ?`;
+   379→        values.push(req.params.id);
+   380→
+   381→        if (req.user.role !== 'admin') {
+   382→            sql += ' AND user_id = ?';
+   383→            values.push(req.user.id);
+   384→        }
+   385→
+   386→        console.log('Executing SQL:', sql);
+   387→        console.log('Parameters:', values);
+   388→
+   389→        const [result] = await db.query(sql, values);
+   390→        if (result.affectedRows === 0) return res.status(404).json({ error: 'Not found or permission denied' });
+   391→
+   392→        const [rows] = await db.query('SELECT * FROM patients WHERE id = ?', [req.params.id]);
+   393→        res.json(mapping.mapPatientToAPI(rows[0]));
+   394→    } catch (err) {
+   395→        res.status(500).json({ error: err.message });
+   396→    }
+   397→});
+   398→
+   399→// --- Doctors API ---
+   400→
+   401→app.get('/manger_data/doctors', authenticateToken, async (req, res) => {
+   402→    try {
+   403→        let sql = 'SELECT * FROM doctors';
+   404→        let params = [];
+   405→        if (req.user.role !== 'admin') {
+   406→            sql += ' WHERE user_id = ?';
+   407→            params.push(req.user.id);
+   408→        }
+   409→        const [rows] = await db.query(sql, params);
+   410→        res.json(rows.map(mapping.mapDoctorToAPI));
+   411→    } catch (err) {
+   412→        res.status(500).json({ error: err.message });
+   413→    }
+   414→});
+   415→
+   416→app.post('/manger_data/doctors', authenticateToken, async (req, res) => {
+   417→    try {
+   418→        const data = mapping.mapDoctorFromAPI(req.body);
+   419→        data.user_id = req.user.id;
+   420→        const [result] = await db.query('INSERT INTO doctors SET ?', data);
+   421→        const [rows] = await db.query('SELECT * FROM doctors WHERE id = ?', [result.insertId]);
+   422→        res.json(mapping.mapDoctorToAPI(rows[0]));
+   423→    } catch (err) {
+   424→        res.status(500).json({ error: err.message });
+   425→    }
+   426→});
+   427→
+   428→app.get('/manger_data/doctors/:id', authenticateToken, async (req, res) => {
+   429→    try {
+   430→        const [rows] = await db.query('SELECT * FROM doctors WHERE id = ?', [req.params.id]);
+   431→        if (rows.length === 0) {
+   432→            return res.status(404).json({ error: 'Doctor not found' });
+   433→        }
+   434→        res.json(mapping.mapDoctorToAPI(rows[0]));
+   435→    } catch (err) {
+   436→        res.status(500).json({ error: err.message });
+   437→    }
+   438→});
+   439→
+   440→app.put('/manger_data/doctors/:id', authenticateToken, async (req, res) => {
+   441→    try {
+   442→        const data = mapping.mapDoctorFromAPI(req.body);
+   443→        data.user_id = req.user.id; // Ensure user_id is preserved or checked? 
+   444→        // Actually, for update we might not want to overwrite user_id if logic differs, 
+   445→        // but mapDoctorFromAPI doesn't include user_id usually.
+   446→        // Let's check mapDoctorFromAPI.
+   447→
+   448→        await db.query('UPDATE doctors SET ? WHERE id = ?', [data, req.params.id]);
+   449→        const [rows] = await db.query('SELECT * FROM doctors WHERE id = ?', [req.params.id]);
+   450→        res.json(mapping.mapDoctorToAPI(rows[0]));
+   451→    } catch (err) {
+   452→        res.status(500).json({ error: err.message });
+   453→    }
+   454→});
+   455→
+   456→app.delete('/manger_data/doctors/:id', authenticateToken, async (req, res) => {
+   457→    try {
+   458→        let sql = 'DELETE FROM doctors WHERE id = ?';
+   459→        let params = [req.params.id];
+   460→        if (req.user.role !== 'admin') {
+   461→            sql += ' AND user_id = ?';
+   462→            params.push(req.user.id);
+   463→        }
+   464→        await db.query(sql, params);
+   465→        res.json({ success: true });
+   466→    } catch (err) {
+   467→        res.status(500).json({ error: err.message });
+   468→    }
+   469→});
+   470→
+   471→// --- Hospitals API ---
+   472→
+   473→app.get('/manger_data/hospitals', authenticateToken, async (req, res) => {
+   474→    try {
+   475→        console.log('GET hospitals. User:', req.user.username, 'Role:', req.user.role);
+   476→        let sql = 'SELECT * FROM hospitals';
+   477→        let params = [];
+   478→        if (req.user.role !== 'admin') {
+   479→            sql += ' WHERE user_id = ?';
+   480→            params.push(req.user.id);
+   481→        }
+   482→        const [rows] = await db.query(sql, params);
+   483→        res.json(rows.map(mapping.mapHospitalToAPI));
+   484→    } catch (err) {
+   485→        res.status(500).json({ error: err.message });
+   486→    }
+   487→});
+   488→
+   489→app.post('/manger_data/hospitals', authenticateToken, upload.single('input_central_logo'), async (req, res) => {
+   490→    try {
+   491→        console.log('Creating hospital with body:', req.body);
+   492→        const data = mapping.mapHospitalFromAPI(req.body);
+   493→
+   494→        if (req.file) {
+   495→            data.logo = '/uploads/' + req.file.filename;
+   496→        }
+   497→
+   498→        data.user_id = req.user.id;
+   499→        console.log('Mapped data for INSERT:', data);
+   500→
+   501→        const [result] = await db.query('INSERT INTO hospitals SET ?', data);
+   502→        const [rows] = await db.query('SELECT * FROM hospitals WHERE id = ?', [result.insertId]);
+   503→        res.json(mapping.mapHospitalToAPI(rows[0]));
+   504→    } catch (err) {
+   505→        console.error('Error creating hospital:', err);
+   506→        res.status(500).json({ error: err.message });
+   507→    }
+   508→});
+   509→
+   510→app.get('/manger_data/hospitals/:id', authenticateToken, async (req, res) => {
+   511→    try {
+   512→        const [rows] = await db.query('SELECT * FROM hospitals WHERE id = ?', [req.params.id]);
+   513→        if (rows.length === 0) {
+   514→            return res.status(404).json({ error: 'Hospital not found' });
+   515→        }
+   516→        res.json(mapping.mapHospitalToAPI(rows[0]));
+   517→    } catch (err) {
+   518→        res.status(500).json({ error: err.message });
+   519→    }
+   520→});
+   521→
+   522→
+   523→
+   524→app.put('/manger_data/hospitals/:id', authenticateToken, upload.single('input_central_logo'), async (req, res) => {
+   525→    try {
+   526→        console.log('Updating hospital with body:', req.body);
+   527→        const data = mapping.mapHospitalFromAPI(req.body);
+   528→
+   529→        if (req.file) {
+   530→            data.logo = '/uploads/' + req.file.filename;
+   531→        } else {
+   532→            // If no file uploaded, remove logo from data so it doesn't overwrite existing value with null/undefined
+   533→            delete data.logo;
+   534→        }
+   535→
+   536→        await db.query('UPDATE hospitals SET ? WHERE id = ?', [data, req.params.id]);
+   537→
+   538→        const [rows] = await db.query('SELECT * FROM hospitals WHERE id = ?', [req.params.id]);
+   539→        res.json(mapping.mapHospitalToAPI(rows[0]));
+   540→    } catch (err) {
+   541→        console.error('Error updating hospital:', err);
+   542→        res.status(500).json({ error: err.message });
+   543→    }
+   544→});
+   545→
+   546→app.delete('/manger_data/hospitals/:id', authenticateToken, async (req, res) => {
+   547→    try {
+   548→        let sql = 'DELETE FROM hospitals WHERE id = ?';
+   549→        let params = [req.params.id];
+   550→        if (req.user.role !== 'admin') {
+   551→            sql += ' AND user_id = ?';
+   552→            params.push(req.user.id);
+   553→        }
+   554→        await db.query(sql, params);
+   555→        res.json({ success: true });
+   556→    } catch (err) {
+   557→        res.status(500).json({ error: err.message });
+   558→    }
+   559→});
+   560→
+   561→// --- Nationalities API ---
+   562→// Shared resource, readable by all, writable by Admin only?
+   563→// Schema update didn't put user_id on nationalities.
+   564→// Assuming Shared Read, Admin Write? Or just open for now but require auth.
+   565→// User said "Add hospital... link to user". didn't mention nationality.
+   566→// I'll keep it open for read/write but authenticated for now.
+   567→
+   568→app.get('/manger_data/nationalities', authenticateToken, async (req, res) => {
+   569→    try {
+   570→        const [rows] = await db.query('SELECT * FROM nationalities');
+   571→        res.json(rows.map(mapping.mapNationalityToAPI));
+   572→    } catch (err) {
+   573→        res.status(500).json({ error: err.message });
+   574→    }
+   575→});
+   576→
+   577→app.post('/manger_data/nationalities', authenticateToken, async (req, res) => {
+   578→    try {
+   579→        const data = mapping.mapNationalityFromAPI(req.body);
+   580→        const [result] = await db.query('INSERT INTO nationalities SET ?', data);
+   581→        const [rows] = await db.query('SELECT * FROM nationalities WHERE id = ?', [result.insertId]);
+   582→        res.json(mapping.mapNationalityToAPI(rows[0]));
+   583→    } catch (err) {
+   584→        res.status(500).json({ error: err.message });
+   585→    }
+   586→});
+   587→
+   588→app.delete('/manger_data/nationalities/:id', authenticateToken, async (req, res) => {
+   589→    try {
+   590→        await db.query('DELETE FROM nationalities WHERE id = ?', [req.params.id]);
+   591→        res.json({ success: true });
+   592→    } catch (err) {
+   593→        res.status(500).json({ error: err.message });
+   594→    }
+   595→});
+   596→
+   597→// --- Reports API ---
+   598→
+   599→app.get('/manger_data/reports/:type/generate/:id', authenticateToken, async (req, res) => {
+   600→    const { type, id } = req.params;
+   601→    console.log(`Generating report ${type} for ID: ${id}`);
+   602→
+   603→    try {
+   604→        // Fetch Patient
+   605→        const [patients] = await db.query('SELECT * FROM patients WHERE id = ?', [id]);
+   606→        if (patients.length === 0) return res.status(404).send('Patient not found');
+   607→        const patient = patients[0];
+   608→
+   609→        // Fetch Hospital
+   610→        let hospital = {};
+   611→        if (patient.hospital_id) {
+   612→            const [hospitals] = await db.query('SELECT * FROM hospitals WHERE id = ?', [patient.hospital_id]);
+   613→            if (hospitals.length > 0) hospital = hospitals[0];
+   614→        }
+   615→
+   616→        // Fetch Doctor (optional if details already in patient snapshot)
+   617→        let doctor = {};
+   618→        if (patient.doctor_id) {
+   619→            const [doctors] = await db.query('SELECT * FROM doctors WHERE id = ?', [patient.doctor_id]);
+   620→            if (doctors.length > 0) doctor = doctors[0];
+   621→        }
+   622→
+   623→        // Fetch Nationality
+   624→        if (patient.nationality_id) {
+   625→            const [nationalities] = await db.query('SELECT * FROM nationalities WHERE id = ?', [patient.nationality_id]);
+   626→            if (nationalities.length > 0) {
+   627→                patient.nationalityObj = nationalities[0];
+   628→            }
+   629→        }
+   630→
+   631→        // Decide which report to generate
+   632→        // The user specifically asked for "Companion Leave Report" logic for "export leave".
+   633→        // Use companion report for 'sick' or 'companion' types for now, or just 'sick' if that's what button sends.
+   634→        // Frontend sends 'sick' for "Leave Report" button? No, search results uses specific routes.
+   635→        // The user said "Export Leave" button in PatientsList.
+   636→        // I'll make that button trigger 'companion' type or just fallback to companion generator if type is 'companion'.
+   637→
+   638→        if (type === 'companion') {
+   639→            await generateCompanionReport(patient, hospital, doctor, res);
+   640→        } else if (type === 'sick' || type === 'leave') {
+   641→            await generateSickLeaveReport(patient, hospital, doctor, res);
+   642→        } else {
+   643→            // Fallback or other reports
+   644→            res.status(400).send('Report type not supported yet');
+   645→        }
+   646→
+   647→    } catch (err) {
+   648→        console.error('Report Generation Error:', err);
+   649→        res.status(500).send('Server Error');
+   650→    }
+   651→});
+   652→
+   653→// --- Bot API Endpoint (No Auth - Uses API Key) ---
+   654→const BOT_API_KEY = process.env.BOT_API_KEY || 'seha_bot_secret_key_2025';
+   655→
+   656→// Bot adds leave data directly
+   657→app.post('/api/bot/add_leave', async (req, res) => {
+   658→    try {
+   659→        // Verify API key from header
+   660→        const apiKey = req.headers['x-api-key'];
+   661→        if (apiKey !== BOT_API_KEY) {
+   662→            return res.status(401).json({ success: false, message: 'Invalid API key' });
+   663→        }
+   664→
+   665→        const {
+   666→            leaveNumber, idNumber, name, nameEn,
+   667→            reportDate, entryDate, exitDate,
+   668→            doctor, doctorEn, jobTitle, jobTitleEn,
+   669→            dayCount, employer, employerEn,
+   670→            nationality, nationalityEn,
+   671→            hospitalName, hospitalNameEn,
+   672→            leaveType
+   673→        } = req.body;
+   674→
+   675→        if (!leaveNumber || !idNumber || !name) {
+   676→            return res.status(400).json({
+   677→                success: false,
+   678→                message: 'Missing required fields: leaveNumber, idNumber, name'
+   679→            });
+   680→        }
+   681→
+   682→        // Find or create a default admin user for bot-created records
+   683→        let [botUsers] = await db.query("SELECT id FROM users WHERE username = 'bot_api'");
+   684→        let botUserId = 1; // fallback
+   685→        if (botUsers.length > 0) {
+   686→            botUserId = botUsers[0].id;
+   687→        } else {
+   688→            // Create bot user if not exists
+   689→            const hashedPassword = await bcrypt.hash('bot_internal_' + Date.now(), 10);
+   690→            const [result] = await db.query(
+   691→                'INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)',
+   692→                ['bot_api', hashedPassword, 'admin', 1]
+   693→            );
+   694→            botUserId = result.insertId;
+   695→        }
+   696→
+   697→        // Find or create nationality
+   698→        let nationality_id = null;
+   699→        if (nationality) {
+   700→            const [existingNat] = await db.query('SELECT id FROM nationalities WHERE name_ar = ? OR name_en = ?', [nationality, nationalityEn || nationality]);
+   701→            if (existingNat.length > 0) {
+   702→                nationality_id = existingNat[0].id;
+   703→            } else {
+   704→                const [natResult] = await db.query('INSERT INTO nationalities (name_ar, name_en) VALUES (?, ?)', [nationality, nationalityEn || nationality]);
+   705→                nationality_id = natResult.insertId;
+   706→            }
+   707→        }
+   708→
+   709→        // Find or create hospital
+   710→        let hospital_id = null;
+   711→        if (hospitalName) {
+   712→            const [existingHosp] = await db.query('SELECT id FROM hospitals WHERE name_ar = ? OR name_en = ?', [hospitalName, hospitalNameEn || hospitalName]);
+   713→            if (existingHosp.length > 0) {
+   714→                hospital_id = existingHosp[0].id;
+   715→            } else {
+   716→                const [hospResult] = await db.query('INSERT INTO hospitals (name_ar, name_en, type, user_id) VALUES (?, ?, ?, ?)', [hospitalName, hospitalNameEn || hospitalName, 'private', botUserId]);
+   717→                hospital_id = hospResult.insertId;
+   718→            }
+   719→        }
+   720→
+   721→        // Check if patient already exists with this gsl_code and identity_number
+   722→        const [existing] = await db.query(
+   723→            'SELECT id FROM patients WHERE gsl_code = ? AND identity_number = ?',
+   724→            [leaveNumber, idNumber]
+   725→        );
+   726→
+   727→        if (existing.length > 0) {
+   728→            // Update existing record
+   729→            const updateData = {
+   730→                name_ar: name,
+   731→                name_en: nameEn || name,
+   732→                identity_number: idNumber,
+   733→                issue_date: reportDate || null,
+   734→                date_from: entryDate || null,
+   735→                date_to: exitDate || null,
+   736→                day_count: dayCount || null,
+   737→                doctor_name_ar: doctor || null,
+   738→                doctor_name_en: doctorEn || null,
+   739→                doctor_specialty_ar: jobTitle || null,
+   740→                doctor_specialty_en: jobTitleEn || null,
+   741→                employer: employer || null,
+   742→                employer_en: employerEn || null,
+   743→                leave_type: leaveType || 'sick'
+   744→            };
+   745→
+   746→            if (nationality_id) updateData.nationality_id = nationality_id;
+   747→            if (hospital_id) updateData.hospital_id = hospital_id;
+   748→
+   749→            // Calculate Hijri dates
+   750→            if (updateData.date_from) {
+   751→                updateData.hijri_admission_date = toHijri(updateData.date_from);
+   752→            }
+   753→            if (updateData.date_to) {
+   754→                updateData.hijri_discharge_date = toHijri(updateData.date_to);
+   755→            }
+   756→
+   757→            // Remove null values
+   758→            Object.keys(updateData).forEach(key => {
+   759→                if (updateData[key] === null || updateData[key] === undefined) {
+   760→                    delete updateData[key];
+   761→                }
+   762→            });
+   763→
+   764→            const updates = [];
+   765→            const values = [];
+   766→            Object.keys(updateData).forEach(key => {
+   767→                updates.push(`${key} = ?`);
+   768→                values.push(updateData[key]);
+   769→            });
+   770→
+   771→            values.push(existing[0].id);
+   772→            await db.query(`UPDATE patients SET ${updates.join(', ')} WHERE id = ?`, values);
+   773→
+   774→            res.json({
+   775→                success: true,
+   776→                message: 'Leave record updated successfully',
+   777→                data: { leave_number: leaveNumber, action: 'updated' }
+   778→            });
+   779→
+   780→        } else {
+   781→            // Insert new record
+   782→            const insertData = {
+   783→                gsl_code: leaveNumber,
+   784→                identity_number: idNumber,
+   785→                name_ar: name,
+   786→                name_en: nameEn || name,
+   787→                issue_date: reportDate || null,
+   788→                date_from: entryDate || null,
+   789→                date_to: exitDate || null,
+   790→                day_count: dayCount || null,
+   791→                doctor_name_ar: doctor || null,
+   792→                doctor_name_en: doctorEn || null,
+   793→                doctor_specialty_ar: jobTitle || null,
+   794→                doctor_specialty_en: jobTitleEn || null,
+   795→                employer: employer || null,
+   796→                employer_en: employerEn || null,
+   797→                leave_type: leaveType || 'sick',
+   798→                user_id: botUserId,
+   799→                prevent_inquiry: 0
+   800→            };
+   801→
+   802→            if (nationality_id) insertData.nationality_id = nationality_id;
+   803→            if (hospital_id) insertData.hospital_id = hospital_id;
+   804→
+   805→            // Calculate Hijri dates
+   806→            if (insertData.date_from) {
+   807→                insertData.hijri_admission_date = toHijri(insertData.date_from);
+   808→            }
+   809→            if (insertData.date_to) {
+   810→                insertData.hijri_discharge_date = toHijri(insertData.date_to);
+   811→            }
+   812→
+   813→            // Remove null values to avoid SQL issues
+   814→            Object.keys(insertData).forEach(key => {
+   815→                if (insertData[key] === null || insertData[key] === undefined) {
+   816→                    delete insertData[key];
+   817→                }
+   818→            });
+   819→
+   820→            const [result] = await db.query('INSERT INTO patients SET ?', insertData);
+   821→
+   822→            res.json({
+   823→                success: true,
+   824→                message: 'Leave record added successfully',
+   825→                data: { leave_number: leaveNumber, id: result.insertId, action: 'created' }
+   826→            });
+   827→        }
+   828→
+   829→    } catch (err) {
+   830→        console.error('Bot API Error:', err);
+   831→        res.status(500).json({ success: false, message: err.message });
+   832→    }
+   833→});
+   834→
+   835→// --- Health Check ---
+   836→app.get('/api/health', (req, res) => {
+   837→    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+   838→});
+   839→
+   840→// --- Database Auto-Setup on Startup ---
+   841→async function waitForDatabase(maxRetries = 15, delayMs = 3000) {
+   842→    for (let i = 0; i < maxRetries; i++) {
+   843→        try {
+   844→            await db.query('SELECT 1');
+   845→            console.log('Database connection established.');
+   846→            return true;
+   847→        } catch (err) {
+   848→            console.log(`Waiting for database... (${i + 1}/${maxRetries})`);
+   849→            await new Promise(resolve => setTimeout(resolve, delayMs));
+   850→        }
+   851→    }
+   852→    throw new Error('Could not connect to database after retries.');
+   853→}
+   854→
+   855→async function initializeDatabase() {
+   856→    try {
+   857→        // Wait for MySQL to be ready
+   858→        await waitForDatabase();
+   859→
+   860→        console.log('Checking database tables...');
+   861→        const schemaPath = path.join(__dirname, 'schema.sql');
+   862→
+   863→        if (fs.existsSync(schemaPath)) {
+   864→            const schema = fs.readFileSync(schemaPath, 'utf8');
+   865→            const statements = schema.split(';').filter(stmt => stmt.trim().length > 0);
+   866→
+   867→            for (const statement of statements) {
+   868→                try {
+   869→                    await db.query(statement);
+   870→                } catch (err) {
+   871→                    // Ignore "already exists" errors
+   872→                    if (!err.message.includes('already exists')) {
+   873→                        console.error('Schema warning:', err.message);
+   874→                    }
+   875→                }
+   876→            }
+   877→            console.log('Database schema initialized.');
+   878→        }
+   879→
+   880→        // Seed default admin user
+   881→        const [users] = await db.query("SELECT id FROM users WHERE username = 'admin'");
+   882→        if (users.length === 0) {
+   883→            const hashedPassword = await bcrypt.hash('admin123', 10);
+   884→            await db.query(
+   885→                'INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)',
+   886→                ['admin', hashedPassword, 'admin', 1]
+   887→            );
+   888→            console.log('Default admin user created (username: admin, password: admin123)');
+   889→        }
+   890→
+   891→        // Seed bot user
+   892→        const [botUsers] = await db.query("SELECT id FROM users WHERE username = 'bot_api'");
+   893→        if (botUsers.length === 0) {
+   894→            const hashedPassword = await bcrypt.hash('bot_internal_' + Date.now(), 10);
+   895→            await db.query(
+   896→                'INSERT INTO users (username, password, role, is_active) VALUES (?, ?, ?, ?)',
+   897→                ['bot_api', hashedPassword, 'admin', 1]
+   898→            );
+   899→            console.log('Bot API user created.');
+   900→        }
+   901→    } catch (err) {
+   902→        console.error('Database initialization error:', err.message);
+   903→    }
+   904→}
+   905→
+   906→// Start Server
+   907→initializeDatabase().then(() => {
+   908→    app.listen(PORT, '0.0.0.0', () => {
+   909→        console.log(`Server running on port ${PORT}`);
+   910→        console.log(`Health check: http://0.0.0.0:${PORT}/api/health`);
+   911→        console.log(`Bot API: http://0.0.0.0:${PORT}/api/bot/add_leave`);
+   912→    });
+   913→}).catch(err => {
+   914→    console.error('Failed to start server:', err);
+   915→    process.exit(1);
+   916→});
+   917→

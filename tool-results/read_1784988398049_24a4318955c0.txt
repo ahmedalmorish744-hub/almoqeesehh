@@ -1,0 +1,760 @@
+     1→#!/usr/bin/env python3
+     2→# -*- coding: utf-8 -*-
+     3→"""
+     4→Enhanced PDF Generator for Seha Sick Leave Reports with Arabic Text Support - Updated Version
+     5→وحدة توليد تقارير الإجازة المرضية بصيغة PDF - النسخة المحدثة والمصححة
+     6→"""
+     7→
+     8→import os
+     9→import re
+    10→import qrcode
+    11→import random
+    12→import time
+    13→from datetime import datetime
+    14→from fpdf import FPDF
+    15→from PIL import Image
+    16→from config_updated import *
+    17→from config_updated import QR_DISPLAY_URL
+    18→import arabic_reshaper
+    19→from bidi.algorithm import get_display
+    20→
+    21→class SickLeavePDF(FPDF):
+    22→    def __init__(self):
+    23→        super().__init__(orientation='P', unit='mm', format=(PDF_WIDTH, PDF_HEIGHT))
+    24→        self.set_auto_page_break(auto=False)
+    25→        # تحميل الخطوط
+    26→        self.load_fonts()
+    27→
+    28→    def load_fonts(self):
+    29→        """تحميل الخطوط المطلوبة"""
+    30→        # خطوط عربية - أساسية ولا يمكن الاستغناء عنها
+    31→        if not os.path.exists(NOTO_SANS_ARABIC_BOLD):
+    32→            raise FileNotFoundError(f"ملف الخط العربي غير موجود: {NOTO_SANS_ARABIC_BOLD}")
+    33→        if not os.path.exists(NOTO_SANS_ARABIC_REGULAR):
+    34→            raise FileNotFoundError(f"ملف الخط العربي غير موجود: {NOTO_SANS_ARABIC_REGULAR}")
+    35→        
+    36→        self.add_font('NotoSansArabic-Bold', '', NOTO_SANS_ARABIC_BOLD)
+    37→        self.add_font('NotoSansArabic-Regular', '', NOTO_SANS_ARABIC_REGULAR)
+    38→        
+    39→        # خطوط إنجليزية - استخدام خط Times المدمج (Times-Bold / Times-Roman)
+    40→        # خط Times مدمج في fpdf2 ولا يحتاج ملفات خارجية
+    41→        print("✅ استخدام خط Times المدمج للنصوص الإنجليزية")
+    42→
+    43→    def process_arabic_text(self, text):
+    44→        """معالجة النص العربي النقي (بدون أرقام/رموز مختلطة)"""
+    45→        if not text:
+    46→            return ""
+    47→        try:
+    48→            reshaped_text = arabic_reshaper.reshape(text)
+    49→            bidi_text = get_display(reshaped_text)
+    50→            return bidi_text
+    51→        except Exception as e:
+    52→            print(f"خطأ في معالجة النص العربي: {e}")
+    53→            return text
+    54→
+    55→    # ═══════════════════════════════════════════════════════════════
+    56→    # ✅ FIX: دالة safe_arabic_mixed - الإصدار المصحح نهائياً
+    57→    # تحافظ على الأقواس () والشرطات / و - والأرقام في أماكنها الصحيحة
+    58→    # ═══════════════════════════════════════════════════════════════
+    59→    def safe_arabic_mixed(self, text):
+    60→        """
+    61→        معالجة آمنة للنص المختلط (عربي + أرقام + رموز مثل: 2 يوم (1447-03-28 إلى 1447-03-29)).
+    62→        تستخدم arabic_reshaper + python-bidi لمعالجة النص كاملاً دون تقطيع أو عكس يدوي.
+    63→        """
+    64→        if not text:
+    65→            return ""
+    66→        try:
+    67→            # ✅ الخطوة 1: إعادة تشكيل الأحرف العربية للاتصال الصحيح (ربط الحروف)
+    68→            reshaped = arabic_reshaper.reshape(text)
+    69→            
+    70→            # ✅ الخطوة 2: تطبيق خوارزمية Unicode BiDi للترتيب البصري الصحيح
+    71→            # هذه الدالة تحافظ على مواضع الأرقام، الأقواس، الشرطات، والمسافات
+    72→            bidi_text = get_display(reshaped)
+    73→            
+    74→            return bidi_text
+    75→        except Exception as e:
+    76→            print(f"⚠️ خطأ في safe_arabic_mixed: {e}")
+    77→            # في حال حدوث خطأ، نرجع النص الأصلي لضمان عدم ضياع البيانات
+    78→            return text
+    79→
+    80→    def add_header_images(self):
+    81→        """إضافة الصور والشعارات في الرأس"""
+    82→        try:
+    83→            if os.path.exists(SEHA_LOGO):
+    84→                self.image(SEHA_LOGO, x=11, y=12, w=56, h=26)
+    85→            if os.path.exists(GEOMETRIC_SHAPE):
+    86→                self.image(GEOMETRIC_SHAPE, x=191, y=12, w=94, h=40)
+    87→            if os.path.exists(KINGDOM_TEXT):
+    88→                self.image(KINGDOM_TEXT, x=100, y=13, w=94, h=45)
+    89→        except Exception as e:
+    90→            print(f"خطأ في إضافة صور الرأس: {e}")
+    91→
+    92→    def add_titles(self):
+    93→        """إضافة العناوين الرئيسية"""
+    94→        self.set_font('NotoSansArabic-Bold', size=22)
+    95→        self.set_text_color(48, 109, 181)
+    96→        self.set_xy(116, 57)
+    97→        arabic_title = self.process_arabic_text('تقرير إجازة مرضية')
+    98→        self.cell(68, 10, arabic_title, align='C')
+    99→
+   100→        self.set_font('Times', 'B', size=18)
+   101→        self.set_text_color(44, 62, 119)
+   102→        self.set_xy(123, 69)
+   103→        self.cell(52, 7, 'Sick Leave Report', align='C')
+   104→
+   105→    def normalize_date_to_ddmmyyyy(self, date_str):
+   106→        """تحويل أي صيغة تاريخ إلى DD-MM-YYYY
+   107→        يدعم: DD-MM-YYYY, YYYY-MM-DD, DD/MM/YYYY, YYYY/MM/DD
+   108→        """
+   109→        if not date_str:
+   110→            return date_str
+   111→        try:
+   112→            for sep in ['-', '/', '.']:
+   113→                if sep in date_str:
+   114→                    parts = date_str.split(sep)
+   115→                    if len(parts) == 3:
+   116→                        if len(parts[0]) == 4:
+   117→                            # YYYY-MM-DD -> DD-MM-YYYY
+   118→                            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+   119→                        else:
+   120→                            # Already DD-MM-YYYY, normalize separator
+   121→                            return f"{parts[0]}-{parts[1]}-{parts[2]}"
+   122→            return date_str
+   123→        except Exception:
+   124→            return date_str
+   125→
+   126→    def parse_date_components(self, date_str):
+   127→        """تحليل التاريخ وإرجاع (day, month, year) بغض النظر عن الصيغة"""
+   128→        if not date_str:
+   129→            return None
+   130→        try:
+   131→            for sep in ['-', '/', '.']:
+   132→                if sep in date_str:
+   133→                    parts = date_str.split(sep)
+   134→                    if len(parts) == 3:
+   135→                        if len(parts[0]) == 4:
+   136→                            # YYYY-MM-DD
+   137→                            return (int(parts[2]), int(parts[1]), int(parts[0]))
+   138→                        else:
+   139→                            # DD-MM-YYYY
+   140→                            return (int(parts[0]), int(parts[1]), int(parts[2]))
+   141→            return None
+   142→        except Exception:
+   143→            return None
+   144→
+   145→    def generate_leave_id(self, id_number, admission_date, discharge_date):
+   146→        """توليد رمز الإجازة GSL فريد لكل إصدار، حتى لو كانت البيانات متطابقة.
+   147→        البادئة الإجبارية: GSL (بصرف النظر عن نوع المنشأة)
+   148→        النظام يدعم توليد أكثر من معرف إجازة فريد - كل محادثة بوت/كل سجل جديد يولد GSL مختلف تماماً.
+   149→
+   150→        الآلية:
+   151→        - تُستخدم آخر 4 أرقام من رقم الهوية + أرقام من تاريخ الدخول + أرقام من تاريخ الخروج كأساس منطقي.
+   152→        - يُضاف جزء عشوائي (4 أرقام) + طابع زمني (آخر 3 أرقام من الملي ثانية) لضمان أن كل رمز
+   153→          جديد يختلف تماماً عن سابقه، حتى لو أُدخلت نفس البيانات بالضبط.
+   154→        - الطول النهائي: 11 رقماً بعد البادئة GSL.
+   155→        """
+   156→        try:
+   157→            # Normalize dates to DD-MM-YYYY first for consistent digit extraction
+   158→            admission_normalized = self.normalize_date_to_ddmmyyyy(admission_date)
+   159→            discharge_normalized = self.normalize_date_to_ddmmyyyy(discharge_date)
+   160→
+   161→            id_part = id_number[-4:] if len(id_number) >= 4 else (id_number or '0000')
+   162→            admission_nums = ''.join(filter(str.isdigit, admission_normalized))[-3:].ljust(3, '0')
+   163→            discharge_nums = ''.join(filter(str.isdigit, discharge_normalized))[-4:].ljust(4, '0')
+   164→
+   165→            # ✅ جزء عشوائي + طابع زمني لضمان التفرّد التام لكل إصدار
+   166→            random_part = f"{random.randint(1000, 9999)}"
+   167→            time_part = f"{int(time.time() * 1000) % 1000:03d}"
+   168→            unique_part = random_part + time_part  # 4 + 3 = 7 أرقام
+   169→
+   170→            base = (discharge_nums + admission_nums + id_part)[:11].ljust(11, '0')
+   171→            # استبدال آخر 7 أرقام بجزء التفرّد لضمان اختلاف الرمز لكل إصدار
+   172→            leave_number = (base[:4] + unique_part)[:11].ljust(11, '0')
+   173→            return f"GSL{leave_number}"
+   174→        except Exception as e:
+   175→            print(f"خطأ في توليد رمز الإجازة: {e}")
+   176→            # حتى في حالة الخطأ، نُولّد رمزاً عشوائياً فريداً
+   177→            random_part = f"{random.randint(10000000, 99999999)}"
+   178→            return f"GSL260{random_part}"
+   179→
+   180→    def swap_date_format(self, date_str):
+   181→        """تحويل التاريخ من YYYY-MM-DD إلى DD-MM-YYYY والعكس"""
+   182→        if not date_str:
+   183→            return date_str
+   184→        try:
+   185→            # First normalize to DD-MM-YYYY
+   186→            normalized = self.normalize_date_to_ddmmyyyy(date_str)
+   187→            # If already normalized (same as input), swap to the other format
+   188→            parts = normalized.split('-')
+   189→            if len(parts) == 3:
+   190→                return f"{parts[2]}-{parts[1]}-{parts[0]}"
+   191→            return date_str
+   192→        except Exception:
+   193→            return date_str
+   194→
+   195→    def calculate_duration(self, admission_date_hijri, discharge_date_hijri,
+   196→                          admission_date_gregorian, discharge_date_gregorian):
+   197→        """حساب مدة الإجازة - جميع التواريخ بصيغة DD-MM-YYYY (مثل 09-02-2026)
+   198→        ملاحظة: نستخدم علامة LRM (U+200E) حول التواريخ لمنع خوارزمية BiDi
+   199→        من عكس اتجاه الأرقام داخل السياق العربي (RTL).
+   200→        """
+   201→        # علامة Left-to-Right Mark لإجبار الأرقام على البقاء بترتيب LTR
+   202→        LRM = '\u200e'
+   203→        try:
+   204→            admission_parsed = self.parse_date_components(admission_date_gregorian)
+   205→            discharge_parsed = self.parse_date_components(discharge_date_gregorian)
+   206→            # تطبيع التواريخ الميلادية إلى DD-MM-YYYY مسبقاً
+   207→            admission_gregorian_normalized = self.normalize_date_to_ddmmyyyy(admission_date_gregorian)
+   208→            discharge_gregorian_normalized = self.normalize_date_to_ddmmyyyy(discharge_date_gregorian)
+   209→            # لف التواريخ بعلامات LRM لإجبارها على البقاء بصيغة DD-MM-YYYY في السياق العربي
+   210→            admission_lrm = f"{LRM}{admission_gregorian_normalized}{LRM}"
+   211→            discharge_lrm = f"{LRM}{discharge_gregorian_normalized}{LRM}"
+   212→            if admission_parsed and discharge_parsed:
+   213→                admission_dt = datetime(admission_parsed[2], admission_parsed[1], admission_parsed[0])
+   214→                discharge_dt = datetime(discharge_parsed[2], discharge_parsed[1], discharge_parsed[0])
+   215→                duration_days = (discharge_dt - admission_dt).days + 1
+   216→
+   217→                # صيغة DD-MM-YYYY للمدة العربية (مع علامات LRM لمنع العكس)
+   218→                duration_ar = f"{duration_days} يوم  ( {admission_lrm} إلى {discharge_lrm} ) "
+   219→
+   220→                day_word = "day" if duration_days == 1 else "days"
+   221→                # صيغة DD-MM-YYYY للمدة الإنجليزية أيضاً
+   222→                duration_en = f"{duration_days} {day_word}  ( {admission_gregorian_normalized} to {discharge_gregorian_normalized} ) "
+   223→                return duration_ar, duration_en
+   224→            else:
+   225→                duration_ar = f"1 يوم  ( {admission_lrm} إلى {discharge_lrm} ) "
+   226→                duration_en = f"1 day  ( {admission_gregorian_normalized} to {discharge_gregorian_normalized} ) "
+   227→                return duration_ar, duration_en
+   228→        except Exception as e:
+   229→            print(f"خطأ في حساب المدة: {e}")
+   230→            duration_ar = f"1 يوم  ( {admission_lrm} إلى {discharge_lrm} ) "
+   231→            duration_en = f"1 day  ( {admission_gregorian_normalized} to {discharge_gregorian_normalized} ) "
+   232→            return duration_ar, duration_en
+   233→
+   234→    def add_table(self, data):
+   235→        """إضافة الجدول الرئيسي"""
+   236→        table_x = 12.5
+   237→        table_y = 85
+   238→        col_widths = [58, 83, 83, 48]
+   239→        row_heights = [15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
+   240→        row_bg_colors = {
+   241→            1: (44, 62, 119),
+   242→            3: (247, 247, 247),
+   243→            5: (247, 247, 247),
+   244→            7: (247, 247, 247),
+   245→            9: (247, 247, 247),
+   246→        }
+   247→
+   248→        # ✅ توليد رمز الإجازة: نستخدم الرمز المُمرّر من data إن وُجد (مما يضمن التطابق
+   249→        # مع الرمز المُرسل إلى API)، وإلا نولّد رمزاً جديداً فريداً هنا.
+   250→        # كل استدعاء يولّد رمزاً مختلفاً عن سابقه بفضل العنصر العشوائي + الطابع الزمني.
+   251→        leave_id = data.get('leave_id')
+   252→        if not leave_id or not str(leave_id).strip().startswith('GSL'):
+   253→            leave_id = self.generate_leave_id(
+   254→                data.get('id_number', '1234567890'),
+   255→                data.get('admission_date_gregorian', '01-01-2025'),
+   256→                data.get('discharge_date_gregorian', '01-01-2025')
+   257→            )
+   258→            # تخزينه في data حتى يستخدمه QR code لاحقاً (ضمان تطابق الجدول و QR)
+   259→            data['leave_id'] = leave_id
+   260→        else:
+   261→            leave_id = str(leave_id).strip()
+   262→
+   263→        duration_ar, duration_en = self.calculate_duration(
+   264→            data.get('admission_date_hijri', '01-01-1446'),
+   265→            data.get('discharge_date_hijri', '01-01-1446'),
+   266→            data.get('admission_date_gregorian', '01-01-2025'),
+   267→            data.get('discharge_date_gregorian', '01-01-2025')
+   268→        )
+   269→
+   270→        # معالجة النصوص العربية النقية
+   271→        processed_data = {}
+   272→        for key, value in data.items():
+   273→            if key.endswith('_ar') and value:
+   274→                processed_data[key] = self.process_arabic_text(value)
+   275→            else:
+   276→                processed_data[key] = value
+   277→
+   278→        # ✅ توحيد جميع التواريخ الميلادية إلى صيغة DD-MM-YYYY (إجباري)
+   279→        admission_date_normalized = self.normalize_date_to_ddmmyyyy(
+   280→            data.get('admission_date_gregorian', '01-01-2025')
+   281→        )
+   282→        discharge_date_normalized = self.normalize_date_to_ddmmyyyy(
+   283→            data.get('discharge_date_gregorian', '01-01-2025')
+   284→        )
+   285→        issue_date_normalized = self.normalize_date_to_ddmmyyyy(
+   286→            data.get('issue_date_gregorian', '01-01-2025')
+   287→        )
+   288→
+   289→        # ✅ معالجة جهة العمل الفارغة: مسافة بيضاء بدلاً من "فارغ" أو "-"
+   290→        employer_ar_value = data.get('employer_ar', '')
+   291→        employer_en_value = data.get('employer_en', '')
+   292→        # إذا كانت القيمة فارغة أو تحتوي على كلمات دالة على الفراغ، نعرض مسافة بيضاء
+   293→        empty_indicators = {'', 'غير محدد', 'فارغ', '-', 'None', 'none', 'null', 'NULL', 'Not Specified', 'N/A', 'n/a'}
+   294→        if not employer_ar_value or employer_ar_value.strip() in empty_indicators:
+   295→            employer_ar_value = ' '  # مسافة بيضاء فارغة
+   296→        else:
+   297→            employer_ar_value = self.process_arabic_text(employer_ar_value)
+   298→        if not employer_en_value or employer_en_value.strip() in empty_indicators:
+   299→            employer_en_value = ' '  # مسافة بيضاء فارغة
+   300→
+   301→        # ✅ استخدام safe_arabic_mixed للنصوص المختلطة (المدة، رقم الهوية)
+   302→        duration_ar_processed = self.safe_arabic_mixed(duration_ar)
+   303→        id_label_processed = self.safe_arabic_mixed('رقم الهوية / الإقامة')
+   304→
+   305→        table_data = [
+   306→            ['Leave ID', leave_id, '', self.process_arabic_text('رمز الإجازة')],
+   307→            ['Leave Duration', duration_en, duration_ar_processed, self.process_arabic_text('مدة الإجازة')],
+   308→            ['Admission Date', admission_date_normalized, admission_date_normalized,
+   309→             self.process_arabic_text('تاريخ الدخول')],
+   310→            ['Discharge Date', discharge_date_normalized, discharge_date_normalized,
+   311→             self.process_arabic_text('تاريخ الخروج')],
+   312→            ['Issue Date', issue_date_normalized, '',
+   313→             self.process_arabic_text('تاريخ إصدار التقرير')],
+   314→            ['Name', processed_data.get('patient_name_en', '').upper(), processed_data.get('patient_name_ar', ''),
+   315→             self.process_arabic_text('الاسم')],
+   316→            ['National ID / Iqama', processed_data.get('id_number', ''), '', id_label_processed],
+   317→            ['Nationality', processed_data.get('nationality_en', ''), processed_data.get('nationality_ar', ''),
+   318→             self.process_arabic_text('الجنسية')],
+   319→            ['Employer', employer_en_value, employer_ar_value,
+   320→             self.process_arabic_text('جهة العمل')],
+   321→            ["Practitioner Name", processed_data.get("doctor_name_en", "").upper(),
+   322→             processed_data.get("doctor_name_ar", ""), self.process_arabic_text("اسم الممارس")],
+   323→            ['Position', processed_data.get('position_en', ''), processed_data.get('position_ar', ''),
+   324→             self.process_arabic_text('المسمى الوظيفي')],
+   325→        ]
+   326→
+   327→        current_y = table_y
+   328→        for row_idx, row_data in enumerate(table_data):
+   329→            current_x = table_x
+   330→            row_height = row_heights[row_idx]
+   331→            if row_idx in row_bg_colors:
+   332→                self.set_fill_color(*row_bg_colors[row_idx])
+   333→                fill = True
+   334→            else:
+   335→                fill = False
+   336→            for col_idx, cell_text in enumerate(row_data):
+   337→                col_width = col_widths[col_idx]
+   338→                if self.is_merged_cell(row_idx, col_idx):
+   339→                    current_x += col_width
+   340→                    continue
+   341→                actual_width = col_width
+   342→                if self.is_merge_start(row_idx, col_idx):
+   343→                    actual_width = col_widths[col_idx] + col_widths[col_idx + 1]
+   344→                self.set_draw_color(217, 217, 217)
+   345→                self.set_line_width(0.5)
+   346→                self.rect(current_x, current_y, actual_width, row_height, 'D' if not fill else 'DF')
+   347→                self.set_cell_font_and_color(row_idx, col_idx, cell_text)
+   348→                if cell_text:
+   349→                    if row_idx == 1 and col_idx == 2:
+   350→                        # خلية المدة العربية - عرض بخطين مع الحفاظ على ترتيب BiDi
+   351→                        self.render_mixed_font_cell_v2(current_x, current_y, actual_width, row_height, cell_text, (255, 255, 255))
+   352→                    elif (row_idx == 5 and col_idx in [1, 2]) or (row_idx == 9 and col_idx in [1, 2]):
+   353→                        # خلية الاسم أو الطبيب - عرض بسطرين إذا كان طويلاً
+   354→                        self.render_long_name_cell(current_x, current_y, actual_width, row_height, cell_text, row_idx, col_idx)
+   355→                    else:
+   356→                        self.set_xy(current_x, current_y)
+   357→                        align = self.get_cell_alignment(row_idx, col_idx)
+   358→                        self.cell(actual_width, row_height, cell_text, align=align)
+   359→                current_x += col_width
+   360→            current_y += row_height
+   361→        self.set_draw_color(217, 217, 217)
+   362→        self.set_line_width(0.5)
+   363→        self.line(153.5, 252, 153.5, 335)
+   364→
+   365→    def is_merged_cell(self, row_idx, col_idx):
+   366→        if row_idx in [0, 4, 6] and col_idx == 2:
+   367→            return True
+   368→        return False
+   369→
+   370→    def is_merge_start(self, row_idx, col_idx):
+   371→        if row_idx in [0, 4, 6] and col_idx == 1:
+   372→            return True
+   373→        return False
+   374→
+   375→    def has_arabic_chars(self, text):
+   376→        """فحص هل النص يحتوي على حروف عربية"""
+   377→        if not text:
+   378→            return False
+   379→        for char in text:
+   380→            if '\u0600' <= char <= '\u06FF' or '\u0750' <= char <= '\u077F' or '\uFB50' <= char <= '\uFDFF' or '\uFE70' <= char <= '\uFEFF':
+   381→                return True
+   382→        return False
+   383→
+   384→    def is_arabic_char(self, char):
+   385→        """فحص هل الحرف عربي"""
+   386→        return ('\u0600' <= char <= '\u06FF' or
+   387→                '\u0750' <= char <= '\u077F' or
+   388→                '\uFB50' <= char <= '\uFDFF' or
+   389→                '\uFE70' <= char <= '\uFEFF')
+   390→
+   391→    def split_mixed_text(self, text):
+   392→        """تقسيم النص إلى أجزاء عربية وأجزاء أرقام/رموز"""
+   393→        if not text:
+   394→            return []
+   395→        segments = []
+   396→        current = ""
+   397→        current_is_arabic = None
+   398→        for char in text:
+   399→            is_ar = self.is_arabic_char(char)
+   400→            if current_is_arabic is None:
+   401→                current_is_arabic = is_ar
+   402→                current = char
+   403→            elif is_ar == current_is_arabic:
+   404→                current += char
+   405→            else:
+   406→                segments.append((current_is_arabic, current))
+   407→                current_is_arabic = is_ar
+   408→                current = char
+   409→        if current:
+   410→            segments.append((current_is_arabic, current))
+   411→        return segments
+   412→
+   413→    def render_long_name_cell(self, x, y, width, height, text, row_idx, col_idx):
+   414→        """عرض خلية الاسم/الطبيب الطويل بسطرين مع توسيط عمودي وأفقي"""
+   415→        if not text:
+   416→            return
+   417→        # تحديد الخط والحجم
+   418→        self.set_cell_font_and_color(row_idx, col_idx, text)
+   419→        font_name = self.font_family
+   420→        font_style = self.font_style
+   421→        font_size = self.font_size_pt
+   422→
+   423→        text_width = self.get_string_width(text)
+   424→        padding = 4  # مسافة أمان من الجوانب
+   425→        available_width = width - padding * 2
+   426→
+   427→        if text_width <= available_width:
+   428→            # النص يكفي بسطر واحد - عرض عادي بالتوسيط
+   429→            self.set_xy(x, y)
+   430→            self.cell(width, height, text, align='C')
+   431→            return
+   432→
+   433→        # النص طويل - تقسيمه إلى سطرين
+   434→        # البحث عن نقطة القطع المثالية: آخر مسافة قبل المنتصف أو بعد المنتصف
+   435→        words = text.split(' ')
+   436→        line1 = ''
+   437→        line2 = ''
+   438→        found_split = False
+   439→
+   440→        for i in range(len(words), 0, -1):
+   441→            test_line = ' '.join(words[:i])
+   442→            if self.get_string_width(test_line) <= available_width:
+   443→                line1 = test_line
+   444→                line2 = ' '.join(words[i:])
+   445→                # إذا السطر الثاني طويل جداً، نقطع من منتصف الكلمة الأخيرة
+   446→                if self.get_string_width(line2) > available_width and line2:
+   447→                    # قطع الكلمة الأخيرة في السطر الأول بشرطة
+   448→                    last_word = words[i-1] if i > 0 else ''
+   449→                    # نحاول نقطع الكلمة الأخيرة
+   450→                    for cut in range(len(last_word)-1, 0, -1):
+   451→                        partial = last_word[:cut] + '-'
+   452→                        test_line1 = ' '.join(words[:i-1] + [partial]) if i > 1 else partial
+   453→                        remainder = last_word[cut:] + ' ' + ' '.join(words[i:]) if i < len(words) else last_word[cut:]
+   454→                        if self.get_string_width(test_line1) <= available_width and self.get_string_width(remainder) <= available_width:
+   455→                            line1 = test_line1
+   456→                            line2 = remainder
+   457→                            break
+   458→                found_split = True
+   459→                break
+   460→
+   461→        if not found_split or not line2:
+   462→            # لا نجد نقطة قطع جيدة - عرض بسطر واحد
+   463→            self.set_xy(x, y)
+   464→            self.cell(width, height, text, align='C')
+   465→            return
+   466→
+   467→        # حساب ارتفاع السطر وتوسيط عمودي
+   468→        line_height = height / 2
+   469→        # توسيط عمودي: حساب الإزاحة من الأعلى
+   470→        total_text_height = line_height * 2
+   471→        y_offset = y + (height - total_text_height) / 2
+   472→
+   473→        # إعادة تعيين الخط (لأن get_string_width قد تغيره)
+   474→        self.set_font(font_name, font_style, size=font_size)
+   475→
+   476→        # السطر الأول
+   477→        self.set_xy(x, y_offset)
+   478→        self.cell(width, line_height, line1, align='C')
+   479→
+   480→        # السطر الثاني
+   481→        self.set_xy(x, y_offset + line_height)
+   482→        self.cell(width, line_height, line2, align='C')
+   483→
+   484→    def render_mixed_font_cell_v2(self, x, y, width, height, text, color):
+   485→        """عرض خلية بخطين مع الحفاظ على ترتيب BiDi:
+   486→        الأرقام والأقواس بخط Times، الحروف العربية بخط NotoSansArabic
+   487→        يتجاهل علامات التحكم مثل LRM (U+200E) لأنها غير مرئية ولا تدعمها خط Times"""
+   488→        if not text:
+   489→            return
+   490→        # إزالة علامات التحكم غير المرئية (LRM, RLM, ZWJ, ZWNJ) لأنها لا تدعمها خط Times
+   491→        # وهي فقط لتوجيه BiDi ولا تظهر بصرياً
+   492→        import unicodedata
+   493→        clean_text = ''.join(
+   494→            char for char in text
+   495→            if unicodedata.category(char) != 'Cf'  # skip Format characters like LRM
+   496→        )
+   497→        text = clean_text
+   498→        # حساب العرض الكلي لكل حرف بالخط المناسب
+   499→        total_width = 0
+   500→        for char in text:
+   501→            if self.is_arabic_char(char):
+   502→                self.set_font('NotoSansArabic-Regular', size=13)
+   503→            else:
+   504→                self.set_font('Times', '', size=13)
+   505→            total_width += self.get_string_width(char)
+   506→        # توسيط أفقي
+   507→        start_x = x + (width - total_width) / 2
+   508→        self.set_xy(start_x, y)
+   509→        self.set_text_color(*color)
+   510→        # عرض كل حرف بالخط المناسب باستخدام write للحفاظ على الترتيب
+   511→        for char in text:
+   512→            if self.is_arabic_char(char):
+   513→                self.set_font('NotoSansArabic-Regular', size=13)
+   514→            else:
+   515→                self.set_font('Times', '', size=13)
+   516→            self.set_text_color(*color)
+   517→            self.write(height, char)
+   518→
+   519→    def set_cell_font_and_color(self, row_idx, col_idx, text):
+   520→        blue_color = (54, 111, 181)
+   521→        dark_blue = (44, 62, 119)
+   522→        white_color = (255, 255, 255)
+   523→        if row_idx == 1:
+   524→            if col_idx in [0, 3]:
+   525→                if col_idx == 0:
+   526→                    self.set_font('Times', 'B', size=13)
+   527→                else:
+   528→                    # عنوان عربي - لا يحتوي أرقام عادة
+   529→                    self.set_font('NotoSansArabic-Bold', size=13)
+   530→                self.set_text_color(*white_color)
+   531→            else:
+   532→                if col_idx == 1:
+   533→                    self.set_font('Times', '', size=13)
+   534→                else:
+   535→                    # خلية رقم 2 صف 2 - مدة الإجازة العربية بدون غامق
+   536→                    self.set_font('NotoSansArabic-Regular', size=13)
+   537→                self.set_text_color(*white_color)
+   538→        elif col_idx == 0:
+   539→            self.set_font('Times', 'B', size=13)
+   540→            self.set_text_color(*blue_color)
+   541→        elif col_idx == 1:
+   542→            font_size = 13
+   543→            self.set_font('Times', '', size=font_size)
+   544→            self.set_text_color(*dark_blue)
+   545→        elif col_idx == 2:
+   546→            # إذا النص أرقام فقط (تواريخ، رقم هوية) استخدم Times مثل الجانب الإنجليزي
+   547→            # إذا النص يحتوي حروف عربية استخدم NotoSansArabic
+   548→            if self.has_arabic_chars(text):
+   549→                self.set_font('NotoSansArabic-Regular', size=13)
+   550→            else:
+   551→                self.set_font('Times', '', size=13)
+   552→            self.set_text_color(*dark_blue)
+   553→        elif col_idx == 3:
+   554→            self.set_font('NotoSansArabic-Bold', size=13)
+   555→            self.set_text_color(*blue_color)
+   556→
+   557→    def get_cell_alignment(self, row_idx, col_idx):
+   558→        if row_idx in [0, 4, 6] and col_idx == 1:
+   559→            return 'C'
+   560→        elif col_idx == 1:
+   561→            if row_idx in [2, 3]:
+   562→                return 'C'
+   563→            else:
+   564→                return 'C'
+   565→        else:
+   566→            return 'C'
+   567→
+   568→    def add_footer_elements(self, data):
+   569→        """إضافة عناصر التذييل"""
+   570→        try:
+   571→            # تطبيع تاريخ الإصدار إلى DD-MM-YYYY لبيانات QR
+   572→            issue_date_normalized = self.normalize_date_to_ddmmyyyy(data.get('issue_date_gregorian', ''))
+   573→            # ✅ إعادة استخدام نفس leave_id المُولّد سابقاً (إن وُجد) لضمان تطابق
+   574→            # الرمز المعروض في الجدول مع الرمز المُضمّن في بيانات QR.
+   575→            # إذا لم يكن موجوداً لأي سبب، نولّد رمزاً جديداً فريداً.
+   576→            leave_id_for_qr = data.get('leave_id')
+   577→            if not leave_id_for_qr or not str(leave_id_for_qr).strip().startswith('GSL'):
+   578→                leave_id_for_qr = self.generate_leave_id(
+   579→                    data.get('id_number', ''),
+   580→                    data.get('admission_date_gregorian', ''),
+   581→                    data.get('discharge_date_gregorian', '')
+   582→                )
+   583→                data['leave_id'] = leave_id_for_qr
+   584→            qr_data = f"{data.get('id_number', '')} - {leave_id_for_qr} - {issue_date_normalized}"
+   585→            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+   586→            qr.add_data(QR_URL)
+   587→            qr.make(fit=True)
+   588→            qr_img = qr.make_image(fill_color="black", back_color="white")
+   589→            qr_path = f"{OUTPUT_DIR}/temp_qr.png"
+   590→            qr_img.save(qr_path)
+   591→            self.image(qr_path, x=60, y=262, w=42, h=40)
+   592→
+   593→            self.set_font('NotoSansArabic-Bold', size=10)
+   594→            self.set_text_color(0, 0, 0)
+   595→            self.set_xy(45, 308)
+   596→            line1_text = self.process_arabic_text('للتحقق من بيانات التقرير يرجى التأكد من زيارة موقع منصة صحة')
+   597→            self.cell(72, 6, line1_text, align='C')
+   598→
+   599→            self.set_xy(45, 314)
+   600→            line2_text = self.process_arabic_text('الرسمي')
+   601→            self.cell(72, 6, line2_text, align='C')
+   602→
+   603→            self.set_font('Times', 'B', size=9)
+   604→            self.set_text_color(0, 0, 0)
+   605→            self.set_xy(45, 320)
+   606→            line3_text = "To check the report please visit Seha's offical website"
+   607→            self.cell(72, 6, line3_text, align='C')
+   608→
+   609→            self.set_font('Times', 'B', size=11)
+   610→            self.set_text_color(0, 0, 255)
+   611→            self.set_xy(45, 326)
+   612→            display_url = (QR_DISPLAY_URL if QR_DISPLAY_URL else QR_URL).replace('https://', '').replace('http://', '')
+   613→            self.cell(72, 6, display_url, align='C', link=QR_URL)
+   614→
+   615→            self.set_draw_color(0, 0, 255)
+   616→            self.set_line_width(0.1)
+   617→            link_start_x = 45 + (72 - self.get_string_width(display_url)) / 2
+   618→            link_end_x = link_start_x + self.get_string_width(display_url)
+   619→            self.line(link_start_x, 331, link_end_x, 331)
+   620→
+   621→            if os.path.exists(qr_path):
+   622→                os.remove(qr_path)
+   623→
+   624→            custom_logo = data.get('custom_logo')
+   625→            if custom_logo and os.path.exists(custom_logo):
+   626→                self.image(custom_logo, x=203, y=263, w=43, h=42)
+   627→            elif os.path.exists(HOSPITAL_LOGO):
+   628→                self.image(HOSPITAL_LOGO, x=203, y=263, w=43, h=42)
+   629→
+   630→            hospital_name_ar = data.get('hospital_name_ar', 'مجمع عائلتي الطبي')
+   631→            hospital_name_en = data.get('hospital_name_en', 'My Family Medical Center')
+   632→
+   633→            self.set_font('NotoSansArabic-Bold', size=12)
+   634→            self.set_text_color(0, 0, 0)
+   635→            self.set_xy(191, 305)
+   636→            processed_hospital_name = self.process_arabic_text(hospital_name_ar)
+   637→            self.cell(67, 10, processed_hospital_name, align='C')
+   638→
+   639→            self.set_font('Times', 'B', size=12)
+   640→            self.set_text_color(0, 0, 0)
+   641→            self.set_xy(191, 315)
+   642→            self.cell(67, 10, hospital_name_en, align='C')
+   643→
+   644→            # ✅ سطر رقم الترخيص: يُعرض فقط إذا وُجد رقم ترخيص في الاستمارة
+   645→            # إذا لم يوجد، لا يظهر السطر إطلاقاً
+   646→            license_number = data.get('license_number', '')
+   647→            # قائمة القيم الفارغة الدالة على عدم وجود رقم ترخيص
+   648→            empty_indicators = {'', 'غير محدد', 'فارغ', '-', 'None', 'none', 'null', 'NULL', 'Not Specified', 'N/A', 'n/a', 'undefined'}
+   649→            if license_number and isinstance(license_number, str) and license_number.strip() not in empty_indicators:
+   650→                # ✅ تنسيق السطر كسلسلة واحدة مختلطة (عربي + نقطتين + أرقام لاتينية)
+   651→                # تُعالَج عبر safe_arabic_mixed (arabic_reshaper + bidi) لضمان ظهور
+   652→                # التسمية العربية على اليمين، ثم النقطتين في المنتصف، ثم الرقم على اليسار.
+   653→                # هذا يضمن عدم ظهور النقطتين في موضع خاطئ بسبب تفاعل RTL و LTR.
+   654→                license_value = str(license_number).strip()
+   655→                full_line = f"رقم الترخيص : {license_value}"
+   656→                processed_line = self.safe_arabic_mixed(full_line)
+   657→                self.set_font('NotoSansArabic-Bold', size=12)
+   658→                self.set_text_color(0, 0, 0)
+   659→                line_w = self.get_string_width(processed_line)
+   660→                # توسيط السطر داخل عرض 67 مم (نفس منطقة اسم المستشفى)
+   661→                start_x = 191 + (67 - line_w) / 2
+   662→                self.set_xy(start_x, 325)
+   663→                self.cell(line_w, 10, processed_line, align='L')
+   664→
+   665→            if os.path.exists(HEALTH_INFO_CENTER_LOGO):
+   666→                self.image(HEALTH_INFO_CENTER_LOGO, x=231, y=336, w=54, h=26)
+   667→
+   668→            current_time = data.get('time', '6:23 AM')
+   669→            current_date = datetime.now().strftime('%A, %d %B %Y')
+   670→            self.set_font('Times', 'B', size=12)
+   671→            self.set_text_color(0, 0, 0)
+   672→            self.set_xy(11, 339)
+   673→            self.cell(20, 6, current_time, align='L')
+   674→            self.set_xy(11, 347)
+   675→            self.cell(47, 6, current_date, align='L')
+   676→        except Exception as e:
+   677→            print(f"خطأ في إضافة عناصر التذييل: {e}")
+   678→
+   679→
+   680→def generate_sick_leave_pdf(data, user_id):
+   681→    """توليد تقرير الإجازة المرضية"""
+   682→    try:
+   683→        os.makedirs(OUTPUT_DIR, exist_ok=True)
+   684→        pdf = SickLeavePDF()
+   685→        pdf.add_page()
+   686→        pdf.add_header_images()
+   687→        pdf.add_titles()
+   688→        pdf.add_table(data)
+   689→        pdf.add_footer_elements(data)
+   690→        id_number = data.get('id_number', 'UNKNOWN')
+   691→        # تطبيع تاريخ الإصدار إلى DD-MM-YYYY لاستخدامه في اسم الملف/السجلات
+   692→        issue_date_raw = data.get('issue_date_gregorian', datetime.now().strftime('%d-%m-%Y'))
+   693→        issue_date = pdf.normalize_date_to_ddmmyyyy(issue_date_raw) if hasattr(pdf, 'normalize_date_to_ddmmyyyy') else issue_date_raw
+   694→        filename = "sickleave.pdf"
+   695→        filepath = os.path.join(OUTPUT_DIR, filename)
+   696→        pdf.output(filepath)
+   697→        return filepath
+   698→    except Exception as e:
+   699→        print(f"خطأ في توليد PDF: {e}")
+   700→        raise e
+   701→
+   702→
+   703→# ═══════════════════════════════════════════════════════════════
+   704→# ✅ قسم الاختبار للتحقق من إصلاح الأقواس والشرطات
+   705→# ═══════════════════════════════════════════════════════════════
+   706→if __name__ == "__main__":
+   707→    pdf = SickLeavePDF()
+   708→    
+   709→    print("🔍 اختبار دالة safe_arabic_mixed بعد الإصلاح:\n")
+   710→    
+   711→    # اختبار 1: مدة الإجازة (المشكلة الرئيسية)
+   712→    test1 = "2 يوم (1447-03-28 إلى 1447-03-29)"
+   713→    result1 = pdf.safe_arabic_mixed(test1)
+   714→    print(f"📝 المدخل:  {test1}")
+   715→    print(f"✅ المخرج: {result1}\n")
+   716→    
+   717→    # اختبار 2: رقم الهوية مع الشرطة المائلة
+   718→    test2 = "رقم الهوية / الإقامة"
+   719→    result2 = pdf.safe_arabic_mixed(test2)
+   720→    print(f"📝 المدخل:  {test2}")
+   721→    print(f"✅ المخرج: {result2}\n")
+   722→    
+   723→    # اختبار 3: نص مختلط مع رموز متعددة
+   724→    test3 = "التقرير رقم (123/أ) صادر بتاريخ 2025-01-15"
+   725→    result3 = pdf.safe_arabic_mixed(test3)
+   726→    print(f"📝 المدخل:  {test3}")
+   727→    print(f"✅ المخرج: {result3}\n")
+   728→    
+   729→    # اختبار 4: توليد تقرير تجريبي
+   730→    print("🧪 جاري إنشاء تقرير تجريبي...\n")
+   731→    test_data = {
+   732→        'patient_name_ar': 'أحمد محمد السعيد',
+   733→        'patient_name_en': 'AHMED Mohammed Alsaeed',
+   734→        'id_number': '1122923749',
+   735→        'nationality_ar': 'سعودي',
+   736→        'nationality_en': 'Saudi Arabia',
+   737→        'employer_ar': 'طالب جامعي',
+   738→        'employer_en': 'University Student',
+   739→        'doctor_name_ar': 'نبيل حنا نصر حنا',
+   740→        'doctor_name_en': 'NABIL HANNA NASR HANNA',
+   741→        'position_ar': 'طبيب عام',
+   742→        'position_en': 'General',
+   743→        'admission_date_gregorian': '12-05-2025',
+   744→        'admission_date_hijri': '14-11-1446',
+   745→        'discharge_date_gregorian': '14-05-2025',
+   746→        'discharge_date_hijri': '16-11-1446',
+   747→        'issue_date_gregorian': '05-07-2025',
+   748→        'hospital_name_ar': 'مجمع عائلتي الطبي',
+   749→        'hospital_name_en': 'My Family Medical Center',
+   750→        'time': '6:23 AM'
+   751→    }
+   752→    try:
+   753→        pdf_path = generate_sick_leave_pdf(test_data, 'test')
+   754→        print(f"✅ تم إنشاء ملف PDF بنجاح: {pdf_path}")
+   755→        print(f"📌 افتح الملف وتأكد من ظهور: ")
+   756→        print(f"   • خلية المدة: 3 يوم (14-11-1446 إلى 16-11-1446)")
+   757→        print(f"   • خلية الهوية: رقم الهوية / الإقامة")
+   758→    except Exception as e:
+   759→        print(f"❌ خطأ أثناء إنشاء التقرير: {e}")
+   760→
