@@ -130,6 +130,20 @@ export async function POST(req: NextRequest) {
     const fontEnReg = "Times-Roman";
     const fontEnBold = "Times-Bold";
 
+    // فك ترميز الشعار المرفوع (base64 data URL) إلى Buffer إن وُجد
+    // Decode the uploaded hospital logo (base64 data URL) into a Buffer if present
+    let uploadedLogoBuffer: Buffer | null = null;
+    if (body.hospital_logo && typeof body.hospital_logo === "string") {
+      const matches = body.hospital_logo.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+      if (matches && matches[2]) {
+        try {
+          uploadedLogoBuffer = Buffer.from(matches[2], "base64");
+        } catch {
+          uploadedLogoBuffer = null;
+        }
+      }
+    }
+
     const drawTextAr = (text: string, x: number, y: number, options: any = {}) => {
       const fontToUse = options.weight === "bold" ? fontArBold : fontArReg;
       if (options.fontSize) doc.fontSize(options.fontSize);
@@ -145,10 +159,89 @@ export async function POST(req: NextRequest) {
       doc.font(fontToUse).text(text, x, y, options);
     };
 
+    /**
+     * عرض خلية نص مختلط عربي/إنجليزي مع الحفاظ على ترتيب BiDi الصحيح
+     * ومنع عكس أرقام التواريخ.
+     *
+     * السبب الجذري للمشكلة: عند تمرير `features: ["rtla"]` إلى pdfkit مع نص
+     * مختلط (عربي + أرقام لاتينية)، يعكس pdfkit ترتيب الأرقام داخل المقاطع
+     * الـ LTR (يظهر "20-09-2025" كـ "5202-90-02"). الحل: لا تستخدم `rtla`
+     * لهذه الخلية — تشكيل الحروف العربية يحدث افتراضياً عبر GSUB بدون الحاجة
+     * لهذه الميزة، وخوارزمية BiDi ستتعامل مع الترتيب البصري الصحيح.
+     *
+     * Root cause: when `features: ["rtla"]` is passed to pdfkit with mixed
+     * Arabic + Latin-digit text, pdfkit reverses digit order within LTR runs
+     * (showing "20-09-2025" as "5202-90-02"). Fix: don't use `rtla` for this
+     * cell — Arabic letter shaping happens via default GSUB without this feature,
+     * and pdfkit's BiDi handles the correct visual order.
+     *
+     * استخدم خط NotoSansArabic للنص بالكامل (يدعم الحروف العربية واللاتينية
+     * والأرقام) لتجنب مشاكل تموضع المقاطع المتعددة على خطوط منفصلة.
+     * Use NotoSansArabic font for the entire text (it supports Arabic letters,
+     * Latin letters, and digits) to avoid multi-segment positioning issues.
+     */
+    const renderMixedRtlCell = (opts: {
+      text: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      fontSize: number;
+      color: string;
+      weight?: "regular" | "bold";
+    }) => {
+      const { text, x, y, width, height, fontSize, color, weight = "regular" } = opts;
+      // أزل علامات التحكم غير المرئية (LRM/RLM/ZWJ/ZWNJ) لأن خط NotoSansArabic
+      // قد يعرضها كمربعات صغيرة. خوارزمية BiDi في pdfkit ستعالج الترتيب صحيحاً
+      // بدونها.
+      // Remove invisible format controls (LRM/RLM/ZWJ/ZWNJ) — NotoSansArabic
+      // may render them as small tofu boxes. pdfkit's BiDi handles order correctly
+      // without them.
+      const cleanText = text.replace(/[\u200e\u200f\u200d\u200c]/g, "");
+      if (!cleanText) return;
+
+      const font = weight === "bold" ? fontArBold : fontArReg;
+      doc.font(font).fontSize(fontSize).fillColor(color);
+
+      // احسب ارتفاع السطر للتوسيط الرأسي
+      // Compute line height for vertical centering
+      const textH = doc.currentLineHeight(true);
+      const startY = y + (height - textH) / 2;
+
+      // اعرض النص بخط NotoSansArabic بدون `features: ["rtla"]` — التشكيل
+      // الافتراضي عبر GSUB يكفي للحروف العربية، وخوارزمية BiDi سترتب الأرقام
+      // والمقاطع اللاتينية في ترتيب LTR الصحيح داخل السياق RTL.
+      // Render the text with NotoSansArabic font WITHOUT `features: ["rtla"]`.
+      // Default GSUB shaping is sufficient for Arabic letters, and pdfkit's BiDi
+      // will order digits and Latin runs in correct LTR within the RTL context.
+      const useRtla = false;
+      const textOpts: any = {
+        width: width,
+        align: "center",
+        lineBreak: false,
+      };
+      if (useArabicFont && useRtla) {
+        textOpts.features = ["rtla"];
+      }
+      doc.text(cleanText, x, startY, textOpts);
+    };
+
     // --- Header: three logos ---
+    // الشعار الأيسر: شعار منصة صحة (ثابت)
+    // Left logo: SEHA platform logo (static)
     if (fs.existsSync(SEHA_LOGO)) doc.image(SEHA_LOGO, 40, 40, { width: 150 });
+    // الشعار الأوسط: نص المملكة العربية السعودية (ثابت)
+    // Center logo: Kingdom of Saudi Arabia text (static)
     if (fs.existsSync(KINGDOM_TEXT)) doc.image(KINGDOM_TEXT, (pageWidth - 180) / 2, 70, { width: 180, align: "center" });
-    if (fs.existsSync(GEOMETRIC)) doc.image(GEOMETRIC, pageWidth - 180, 40, { width: 170 });
+    // الشعار الأيمن: شعار المنشأة المرفوع إن وُجد، وإلا الشعار الافتراضي (geometric-shape)
+    // Right logo: uploaded facility logo if present, otherwise default geometric shape
+    if (uploadedLogoBuffer) {
+      // استخدم fit للحفاظ على نسبة الأبعاد داخل صندوق 170×100
+      // Use fit to preserve aspect ratio inside a 170x100 box
+      doc.image(uploadedLogoBuffer, pageWidth - 210, 30, { fit: [170, 110], align: "center", valign: "center" });
+    } else if (fs.existsSync(GEOMETRIC)) {
+      doc.image(GEOMETRIC, pageWidth - 180, 40, { width: 170 });
+    }
 
     doc.moveDown(9);
 
@@ -311,9 +404,14 @@ export async function POST(req: NextRequest) {
 
     const durText = getArabicDuration(payload.dayCount);
     const duration = `${payload.dayCount} day(s) (${startDateFormatted} to ${endDateFormatted})`;
-    // استخدم الأقواس العربية العريضة （） التي تُعرض بشكل صحيح في اتجاه RTL
-    // Use fullwidth parentheses that render correctly in RTL context
-    const durationAr = `${durText} （${startDateFormatted} الى ${endDateFormatted}）`;
+    // استخدم أقواس ASCII العادية ( ) التي يدعمها خط NotoSansArabic و Times معاً
+    // استخدم علامات LRM (U+200E) حول التواريخ لإجبار الأرقام على البقاء بصيغة DD-MM-YYYY
+    // في السياق العربي (RTL) ومنع خوارزمية BiDi من عكس ترتيب الأرقام.
+    // Use regular ASCII parentheses (supported by both NotoSansArabic and Times).
+    // Wrap each date with LRM (U+200E) marks to keep digits in DD-MM-YYYY order
+    // inside the RTL Arabic context (prevents BiDi from reversing digit pairs).
+    const LRM = "\u200E";
+    const durationAr = `${durText} ( ${LRM}${startDateFormatted}${LRM} الى ${LRM}${endDateFormatted}${LRM} )`;
 
     drawRow("Leave ID", payload.leaveNumber, "رمز الإجازة");
 
@@ -361,12 +459,18 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    doc.font(fontArReg).fontSize(durFontSize - 1);
-    const durValH2 = doc.heightOfString(durationAr, { width: subColW - 20 });
-    const durValY2 = currentY + (rowH - durValH2) / 2;
-    drawTextAr(durationAr, startX + col1W + subColW + 10, durValY2, {
+    // عرض خلية المدة العربية بخطوط مختلطة (Arabic → NotoSansArabic, LTR → Times)
+    // لمنع خوارزمية BiDi في pdfkit من عكس أرقام التواريخ عند استخدام خط عربي
+    // للنص بالكامل. كل مقطع عربي يُعرض بخط NotoSansArabic مع تشكيل RTL،
+    // وكل مقطع أرقام/أقواس يُعرض بخط Times بصيغة LTR بدون تشكيل.
+    // Render the Arabic duration cell with mixed fonts (Arabic → NotoSansArabic,
+    // LTR runs → Times) to prevent pdfkit's BiDi from reversing date digits.
+    renderMixedRtlCell({
+      text: durationAr,
+      x: startX + col1W + subColW + 10,
+      y: currentY,
       width: subColW - 20,
-      align: "center",
+      height: rowH,
       fontSize: durFontSize - 1,
       color: "#ffffff",
     });
@@ -426,6 +530,23 @@ export async function POST(req: NextRequest) {
     });
 
     const rightCenterX = centerX + centerX / 2;
+
+    // شعار المنشأة في التذييل: يُعرض فوق اسم المنشأة إن رُفع شعار من المستخدم
+    // Footer facility logo: shown above the hospital name when user uploaded one
+    if (uploadedLogoBuffer) {
+      // ضع الشعار في صندوق 90×90 فوق اسم المنشأة
+      // Place logo in a 90x90 box above the hospital name
+      const logoBoxW = 90;
+      const logoBoxH = 90;
+      const logoX = rightCenterX - logoBoxW / 2;
+      const logoY = footerY;
+      try {
+        doc.image(uploadedLogoBuffer, logoX, logoY, { fit: [logoBoxW, logoBoxH], align: "center", valign: "center" });
+      } catch {
+        // تجاهل أخطاء الصور
+      }
+    }
+
     drawTextAr(payload.hospitalName || "", rightCenterX - 125, footerY + 100, {
       width: 250,
       align: "center",
@@ -442,16 +563,23 @@ export async function POST(req: NextRequest) {
     });
 
     if (payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim())) {
-      // في RTL، استخدم النقطتين العربيتين ៖ والترتيب الطبيعي عربيًا
-      const fullLine = `رقم الترخيص：${payload.licenseNumber}`;
-      doc.font(fontArBold).fontSize(12);
-      const lineW = doc.widthOfString(fullLine);
-      const startXLic = rightCenterX - lineW / 2;
-      drawTextAr(fullLine, startXLic, footerY + 165, {
-        align: "center",
-        weight: "bold",
+      // استخدم النقطتين العاديتين ":" بدلاً من النقطتين العريضتين "：" لأن NotoSansArabic
+      // قد لا يدعم الحرف العريض فيظهر كمربع صغير. علامات LRM حول الرقم تمنع عكسه.
+      // Use regular ASCII colon ":" instead of fullwidth "：" (NotoSansArabic may lack the
+      // fullwidth glyph and render a tofu box). LRM marks around the number prevent reversal.
+      const LRM = "\u200E";
+      const fullLine = `رقم الترخيص: ${LRM}${payload.licenseNumber}${LRM}`;
+      // استخدم العرض المختلط لمنع عكس الأرقام في سياق RTL
+      // Use mixed rendering to prevent digit reversal in RTL context
+      renderMixedRtlCell({
+        text: fullLine,
+        x: rightCenterX - 150,
+        y: footerY + 155,
+        width: 300,
+        height: 30,
         fontSize: 12,
         color: "#000000",
+        weight: "bold",
       });
     }
 

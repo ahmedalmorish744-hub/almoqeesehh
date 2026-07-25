@@ -30,6 +30,8 @@ import {
   RefreshCw,
   History,
   ArrowLeftRight,
+  Image as ImageIcon,
+  Trash2,
 } from "lucide-react";
 import {
   FIELDS,
@@ -114,6 +116,11 @@ export default function Home() {
   const [pasteStats, setPasteStats] = useState<{ matched: number; total: number } | null>(null);
   const [action, setAction] = useState<ActionState>(INITIAL_ACTION);
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
+  // شعار المنشأة المرفوع (data URL base64) — يُرسل للـ PDF فقط ولا يُخزن في قاعدة البيانات
+  // Uploaded facility logo (base64 data URL) — sent to PDF only, not stored in DB
+  const [hospitalLogo, setHospitalLogo] = useState<string>("");
+  const [logoFileName, setLogoFileName] = useState<string>("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // --- Inquiry state ---
   const [searchMode, setSearchMode] = useState<"gsl" | "id" | "q">("gsl");
@@ -158,11 +165,66 @@ export default function Home() {
     setPasteText("");
     setPasteStats(null);
     setAction(INITIAL_ACTION);
+    setHospitalLogo("");
+    setLogoFileName("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
     if (pdfBlobUrl) {
       URL.revokeObjectURL(pdfBlobUrl);
       setPdfBlobUrl(null);
     }
     toast({ title: "تم مسح كل البيانات", description: "أصبح النموذج جاهزاً لإدخال جديد." });
+  };
+
+  // --- Logo upload ---
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // تحقق من النوع
+    if (!/^image\/(png|jpe?g|gif|webp|bmp)$/i.test(file.type)) {
+      toast({
+        title: "نوع ملف غير مدعوم",
+        description: "الرجاء رفع صورة بصيغة PNG أو JPG أو GIF أو WebP.",
+        variant: "destructive",
+      });
+      return;
+    }
+    // تحقق من الحجم (5 ميغابايت كحد أقصى)
+    const MAX_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      toast({
+        title: "حجم الصورة كبير جداً",
+        description: "الحد الأقصى لحجم الشعار 5 ميغابايت.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") {
+        setHospitalLogo(result);
+        setLogoFileName(file.name);
+        toast({
+          title: "تم رفع الشعار",
+          description: `سيظهر الشعار "${file.name}" في رأس وتذييل ملف PDF.`,
+        });
+      }
+    };
+    reader.onerror = () => {
+      toast({
+        title: "فشل قراءة الملف",
+        description: "تعذّر قراءة ملف الصورة. حاول مرة أخرى.",
+        variant: "destructive",
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveLogo = () => {
+    setHospitalLogo("");
+    setLogoFileName("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    toast({ title: "تم حذف الشعار", description: "لن يظهر شعار مخصص في ملف PDF." });
   };
 
   // --- Save / Load to localStorage ---
@@ -236,10 +298,13 @@ export default function Home() {
 
     const pdfPromise = (async () => {
       try {
+        // أرسل بيانات النموذج + الشعار المرفوع (إن وُجد) إلى API توليد PDF
+        // Send form data + uploaded logo (if any) to the PDF generation API
+        const payload = { ...formData, hospital_logo: hospitalLogo || "" };
         const resp = await fetch("/api/generate-pdf", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(formData),
+          body: JSON.stringify(payload),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
@@ -497,6 +562,67 @@ export default function Home() {
                   مسح الصندوق
                 </Button>
               </CardFooter>
+            </Card>
+
+            {/* Logo Upload */}
+            <Card className="border-2 border-emerald-300/50 shadow-sm">
+              <CardHeader className="bg-emerald-50/50 border-b border-emerald-200/50">
+                <CardTitle className="flex items-center gap-2 text-[#2c3e77]">
+                  <ImageIcon className="w-5 h-5" />
+                  شعار المنشأة (يظهر في ملف PDF)
+                </CardTitle>
+                <CardDescription>
+                  ارفع شعار المستشفى أو المنشأة الطبية بصيغة PNG أو JPG (الحد الأقصى 5 ميغابايت).
+                  سيظهر الشعار في رأس ملف PDF (يمين الصفحة) وفوق اسم المنشأة في التذييل. إن لم ترفع
+                  شعاراً، سيُستخدم الشعار الافتراضي.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pt-4">
+                <div className="flex flex-wrap items-center gap-4">
+                  <div className="flex-1 min-w-[200px]">
+                    <input
+                      ref={fileInputRef}
+                      id="logo-upload"
+                      type="file"
+                      accept="image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp"
+                      onChange={handleLogoUpload}
+                      disabled={isBusy}
+                      className="block w-full text-sm text-slate-600 file:ml-3 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-[#306db5] file:text-white hover:file:bg-[#285d9e] file:cursor-pointer cursor-pointer disabled:opacity-50"
+                    />
+                    <p className="text-xs text-slate-500 mt-1.5">
+                      الأنواع المدعومة: PNG, JPG, GIF, WebP, BMP. الحد الأقصى 5 ميغابايت.
+                    </p>
+                  </div>
+                  {hospitalLogo && (
+                    <div className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                      <img
+                        src={hospitalLogo}
+                        alt="معاينة الشعار"
+                        className="w-16 h-16 object-contain bg-white rounded border border-slate-200"
+                      />
+                      <div className="space-y-1">
+                        <div className="text-xs font-semibold text-emerald-800 flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          تم رفع الشعار
+                        </div>
+                        <div className="text-xs text-slate-600 max-w-[200px] truncate" title={logoFileName}>
+                          {logoFileName}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleRemoveLogo}
+                          disabled={isBusy}
+                          className="h-7 text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-2"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 ml-1" />
+                          حذف الشعار
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
             </Card>
 
             {/* Form */}

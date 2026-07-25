@@ -21,6 +21,12 @@ export interface LeaveFormData {
   hospital_name_en: string;
   license_number: string;
   time: string;
+  /**
+   * Optional hospital/facility logo to embed in the PDF.
+   * Stored as a base64 data URL (e.g. "data:image/png;base64,...").
+   * Not persisted to the database — only used for PDF rendering.
+   */
+  hospital_logo?: string;
 }
 
 export const EMPTY_FORM: LeaveFormData = {
@@ -41,6 +47,7 @@ export const EMPTY_FORM: LeaveFormData = {
   hospital_name_en: "",
   license_number: "",
   time: "",
+  hospital_logo: "",
 };
 
 export const DEFAULTS: LeaveFormData = {
@@ -61,6 +68,7 @@ export const DEFAULTS: LeaveFormData = {
   hospital_name_en: "General Hospital",
   license_number: "",
   time: "12:00 PM",
+  hospital_logo: "",
 };
 
 /**
