@@ -18,7 +18,13 @@ import {
   toISODate,
   toTimeDisplay,
 } from "@/lib/parser";
-import { sql, emptyToNull, SCHEMA_SQL } from "@/lib/db";
+import {
+  sql,
+  emptyToNull,
+  SCHEMA_SQL,
+  isDemoMode,
+  demoUpsertLeave,
+} from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +52,51 @@ export async function POST(req: NextRequest) {
     const issueDate = entryDate || new Date().toISOString().slice(0, 10);
     const timeDisplay = toTimeDisplay(filled.time) || filled.time;
 
-    // اضمن وجود الجداول (آمن للاستدعاء المتكرر)
+    // قيم نظيفة (تُستخدم في كلا الوضعين: DEMO و Vercel Postgres)
+    const natAr = emptyToNull(filled.nationality_ar);
+    const natEn = emptyToNull(filled.nationality_en);
+    const hospAr = emptyToNull(filled.hospital_name_ar);
+    const hospEn = emptyToNull(filled.hospital_name_en);
+    const licenseNumber = emptyToNull(filled.license_number);
+    const docAr = emptyToNull(filled.doctor_name_ar);
+    const docEn = emptyToNull(filled.doctor_name_en);
+    const specAr = emptyToNull(filled.position_ar);
+    const specEn = emptyToNull(filled.position_en);
+
+    // اضمن وجود الجداول (آمن للاستدعاء المتكرر) — أو احفظ في الذاكرة في وضع DEMO
+    if (isDemoMode()) {
+      const saved = demoUpsertLeave({
+        gsl_code: leaveNumber,
+        identity_number: filled.id_number,
+        name_ar: filled.patient_name_ar,
+        name_en: emptyToNull(filled.patient_name_en) ?? filled.patient_name_ar,
+        date_from: entryDate || new Date().toISOString().slice(0, 10),
+        date_to: exitDate || new Date().toISOString().slice(0, 10),
+        day_count: dayCount,
+        issue_date: issueDate,
+        time_from: timeDisplay,
+        nationality_ar: natAr,
+        nationality_en: natEn,
+        employer: emptyToNull(filled.employer_ar),
+        employer_en: emptyToNull(filled.employer_en),
+        doctor_name_ar: docAr,
+        doctor_name_en: docEn,
+        doctor_specialty_ar: specAr,
+        doctor_specialty_en: specEn,
+        hospital_name_ar: hospAr,
+        hospital_name_en: hospEn,
+        license_number: licenseNumber,
+        leave_type: "sick",
+      });
+      return NextResponse.json({
+        success: true,
+        message: "[وضع العرض] تم حفظ الإجازة في الذاكرة المؤقتة — على Vercel ستُحفظ فعلياً في Vercel Postgres.",
+        leave_id: leaveNumber,
+        day_count: dayCount,
+        record_id: saved.id,
+      });
+    }
+
     try {
       await sql.query(SCHEMA_SQL);
     } catch (dbErr: any) {
@@ -76,8 +126,6 @@ export async function POST(req: NextRequest) {
 
     // 2) الجنسية: ابحث أو أنشئ
     let nationalityId: number | null = null;
-    const natAr = emptyToNull(filled.nationality_ar);
-    const natEn = emptyToNull(filled.nationality_en);
     if (natAr || natEn) {
       let natRows;
       if (natAr) {
@@ -102,9 +150,6 @@ export async function POST(req: NextRequest) {
 
     // 3) المنشأة: ابحث أو أنشئ
     let hospitalId: number | null = null;
-    const hospAr = emptyToNull(filled.hospital_name_ar);
-    const hospEn = emptyToNull(filled.hospital_name_en);
-    const licenseNumber = emptyToNull(filled.license_number);
     if (hospAr || hospEn) {
       let hospRows;
       if (hospAr) {
@@ -133,10 +178,6 @@ export async function POST(req: NextRequest) {
 
     // 4) الطبيب: ابحث أو أنشئ
     let doctorId: number | null = null;
-    const docAr = emptyToNull(filled.doctor_name_ar);
-    const docEn = emptyToNull(filled.doctor_name_en);
-    const specAr = emptyToNull(filled.position_ar);
-    const specEn = emptyToNull(filled.position_en);
     if (docAr || docEn) {
       let docRows;
       if (docAr) {

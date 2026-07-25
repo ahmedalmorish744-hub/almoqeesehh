@@ -318,43 +318,74 @@ export default function Home() {
   };
 
   // --- Inquiry ---
-  const handleSearch = useCallback(async () => {
-    if (!searchValue.trim()) {
-      toast({ title: "أدخل قيمة للبحث", variant: "destructive" });
+  // highlights: السجل الذي تم حفظه/طباعته للتو ليُبرز في نتائج الاستعلام
+  const [highlightId, setHighlightId] = useState<number | null>(null);
+
+  const handleSearch = useCallback(
+    async (overrideValue?: string, overrideMode?: "gsl" | "id" | "q") => {
+      const value = (overrideValue ?? searchValue).trim();
+      const mode = overrideMode ?? searchMode;
+      if (!value) {
+        toast({ title: "أدخل قيمة للبحث", variant: "destructive" });
+        return;
+      }
+      setSearching(true);
+      setHasSearched(true);
+      try {
+        const params = new URLSearchParams();
+        params.set(mode, value);
+        const resp = await fetch(`/api/inquire?${params.toString()}`);
+        const data = await resp.json();
+        if (!resp.ok || !data.success) {
+          throw new Error(data?.message || "فشل البحث");
+        }
+        setRecords(data.records || []);
+        toast({
+          title: `تم العثور على ${data.count} سجل`,
+          description:
+            data.count === 0
+              ? "لا توجد نتائج مطابقة."
+              : "اضغط على أي سجل لتحميله في النموذج.",
+        });
+      } catch (e: any) {
+        setRecords([]);
+        toast({
+          title: "فشل البحث",
+          description: e?.message || "خطأ في الاستعلام",
+          variant: "destructive",
+        });
+      } finally {
+        setSearching(false);
+      }
+    },
+    [searchMode, searchValue, toast],
+  );
+
+  /**
+   * بعد نجاح الطباعة + الحفظ، يفتح تبويب الاستعلامات ويبحث تلقائياً
+   * برمز الإجازة (GSL) الذي تم حفظه للتو. يبرز السجل الجديد في النتائج.
+   */
+  const handleViewInInquiry = useCallback(async () => {
+    if (!action.leaveId) {
+      toast({ title: "لا يوجد سجل محفوظ بعد", variant: "destructive" });
       return;
     }
-    setSearching(true);
-    setHasSearched(true);
-    try {
-      const params = new URLSearchParams();
-      params.set(searchMode, searchValue.trim());
-      const resp = await fetch(`/api/inquire?${params.toString()}`);
-      const data = await resp.json();
-      if (!resp.ok || !data.success) {
-        throw new Error(data?.message || "فشل البحث");
-      }
-      setRecords(data.records || []);
-      toast({
-        title: `تم العثور على ${data.count} سجل`,
-        description: data.count === 0 ? "لا توجد نتائج مطابقة." : "اضغط على أي سجل لتحميله في النموذج.",
-      });
-    } catch (e: any) {
-      setRecords([]);
-      toast({
-        title: "فشل البحث",
-        description: e?.message || "خطأ في الاستعلام",
-        variant: "destructive",
-      });
-    } finally {
-      setSearching(false);
-    }
-  }, [searchMode, searchValue, toast]);
+    // انتقل لتبويب الاستعلامات واضبط البحث على رمز الإجازة
+    setActiveTab("inquiry");
+    setSearchMode("gsl");
+    setSearchValue(action.leaveId);
+    setHighlightId(action.recordId ?? null);
+    // اترك وقتاً قصيراً لانتقال التبويب ثم نفّذ البحث
+    await new Promise((r) => setTimeout(r, 150));
+    await handleSearch(action.leaveId, "gsl");
+  }, [action.leaveId, action.recordId, handleSearch]);
 
   const handleLoadRecord = (r: any) => {
     const form = recordToForm(r);
     setFormData(form);
     setActiveTab("new");
     setAction(INITIAL_ACTION);
+    setHighlightId(null);
     if (pdfBlobUrl) {
       URL.revokeObjectURL(pdfBlobUrl);
       setPdfBlobUrl(null);
@@ -599,7 +630,29 @@ export default function Home() {
                       </a>
                     </Button>
                   )}
+                  {action.upload === "success" && action.leaveId && (
+                    <Button
+                      onClick={handleViewInInquiry}
+                      variant="default"
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white h-12"
+                    >
+                      <Search className="w-5 h-5 ml-2" />
+                      عرض في الاستعلامات
+                    </Button>
+                  )}
                 </div>
+
+                {/* رسالة توضيحية تربط الطباعة بالاستعلام */}
+                {action.upload === "success" && action.leaveId && (
+                  <Alert className="bg-emerald-50 border-emerald-200 text-emerald-900">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <AlertTitle>تم رفع البيانات للاستعلامات</AlertTitle>
+                    <AlertDescription>
+                      رمز الإجازة <strong dir="ltr">{action.leaveId}</strong> محفوظ الآن في قاعدة البيانات.
+                      اضغط <strong>"عرض في الاستعلامات"</strong> للانتقال إلى تبويب الاستعلامات ورؤية السجل تلقائياً.
+                    </AlertDescription>
+                  </Alert>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -695,7 +748,12 @@ export default function Home() {
                     ) : (
                       <div className="space-y-2 max-h-[600px] overflow-y-auto pl-1">
                         {records.map((r) => (
-                          <RecordCard key={r.id} record={r} onLoad={() => handleLoadRecord(r)} />
+                          <RecordCard
+                            key={r.id}
+                            record={r}
+                            highlight={r.id === highlightId}
+                            onLoad={() => handleLoadRecord(r)}
+                          />
                         ))}
                       </div>
                     )}
@@ -828,14 +886,34 @@ function StatusBlock({
   );
 }
 
-function RecordCard({ record, onLoad }: { record: any; onLoad: () => void }) {
+function RecordCard({
+  record,
+  onLoad,
+  highlight = false,
+}: {
+  record: any;
+  onLoad: () => void;
+  highlight?: boolean;
+}) {
   const created = record.createdAt ? new Date(record.createdAt).toLocaleString("ar-SA") : "";
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 hover:border-[#306db5] hover:shadow-sm transition-all">
+    <div
+      className={`rounded-lg border-2 p-4 transition-all ${
+        highlight
+          ? "border-emerald-500 bg-emerald-50 shadow-md ring-2 ring-emerald-200"
+          : "border-slate-200 bg-white hover:border-[#306db5] hover:shadow-sm"
+      }`}
+    >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="space-y-1 min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <Badge className="bg-[#2c3e77] text-white">{record.gslCode}</Badge>
+            {highlight && (
+              <Badge className="bg-emerald-600 text-white">
+                <CheckCircle2 className="w-3 h-3 ml-1" />
+                السجل الحديث
+              </Badge>
+            )}
             <span className="font-bold text-slate-800">{record.nameAr}</span>
             {record.nameEn && <span className="text-xs text-slate-500">({record.nameEn})</span>}
           </div>

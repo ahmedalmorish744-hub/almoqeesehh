@@ -52,3 +52,9 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Demo mode local store (only used when DEMO_MODE=true)
+.demo-store.json
+
+# Local env
+.env
+.env.local

@@ -1,20 +1,142 @@
 /**
- * وحدة قاعدة البيانات — تستخدم Vercel Postgres مباشرة.
- * تعمل بنفس الكود محلياً (إذا وفّرت POSTGRES_URL) وعلى Vercel.
+ * Database module — uses Vercel Postgres directly.
+ * Works locally (if POSTGRES_URL is set) and on Vercel.
  *
- * الجداول الخمسة:
- *   users, nationalities, hospitals, doctors, sick_leaves
+ * Tables: users, nationalities, hospitals, doctors, sick_leaves
  *
- * ملاحظة: عند أول نشر على Vercel، شغّل `bun run db:init` محلياً بعد ضبط
- * متغيرات البيئة، أو افتح Vercel Postgres Console ونفّذ schema.sql يدوياً.
+ * Setup: run `bun run db:init` once after setting env vars, or execute
+ * schema.sql from Vercel Dashboard -> Storage -> Query.
+ *
+ * DEMO_MODE: when env var DEMO_MODE=true is set, the app uses an in-memory
+ * store for local preview/demo only. In production on Vercel, leave it
+ * unset to use real Vercel Postgres.
  */
 
-import { sql } from "@vercel/postgres";
+import { sql as vercelSql } from "@vercel/postgres";
+import fs from "fs";
+import path from "path";
 
-export { sql };
+const DEMO_MODE = process.env.DEMO_MODE === "true";
+
+export const sql: any = vercelSql;
 
 // =================================================================
-//  SQL SCHEMA — يُنفَّذ مرة واحدة عند تهيئة قاعدة البيانات
+//  In-memory store (DEMO_MODE only — NOT for production)
+//  NOTE: in dev, each API route may run in a separate worker, so we
+//  persist DEMO records to a JSON file on disk to share state.
+// =================================================================
+interface DemoRecord {
+  id: number;
+  gsl_code: string;
+  identity_number: string;
+  name_ar: string;
+  name_en: string | null;
+  date_from: string;
+  date_to: string;
+  day_count: number;
+  issue_date: string | null;
+  time_from: string | null;
+  nationality_ar: string | null;
+  nationality_en: string | null;
+  employer: string | null;
+  employer_en: string | null;
+  doctor_name_ar: string | null;
+  doctor_name_en: string | null;
+  doctor_specialty_ar: string | null;
+  doctor_specialty_en: string | null;
+  hospital_name_ar: string | null;
+  hospital_name_en: string | null;
+  license_number: string | null;
+  leave_type: string;
+  created_at: string;
+}
+
+// Path to the DEMO JSON file (only used when DEMO_MODE=true)
+const DEMO_FILE = path.join(process.cwd(), ".demo-store.json");
+
+function readDemoStore(): DemoRecord[] {
+  try {
+    if (fs.existsSync(DEMO_FILE)) {
+      const raw = fs.readFileSync(DEMO_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as DemoRecord[];
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+function writeDemoStore(records: DemoRecord[]): void {
+  try {
+    fs.writeFileSync(DEMO_FILE, JSON.stringify(records, null, 2), "utf-8");
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isDemoMode(): boolean {
+  return DEMO_MODE;
+}
+
+/**
+ * DEMO only: insert or update a sick leave record (persisted to a JSON file).
+ * Returns the saved record (with id).
+ */
+export function demoUpsertLeave(input: Omit<DemoRecord, "id" | "created_at">): DemoRecord {
+  const store = readDemoStore();
+  const existingIdx = store.findIndex(
+    (r) => r.gsl_code === input.gsl_code && r.identity_number === input.identity_number,
+  );
+  if (existingIdx >= 0) {
+    store[existingIdx] = { ...store[existingIdx], ...input };
+    writeDemoStore(store);
+    return store[existingIdx];
+  }
+  const nextId = store.reduce((max, r) => Math.max(max, r.id), 0) + 1;
+  const record: DemoRecord = {
+    ...input,
+    id: nextId,
+    created_at: new Date().toISOString(),
+  };
+  store.push(record);
+  writeDemoStore(store);
+  return record;
+}
+
+/**
+ * DEMO only: search sick leave records (read from JSON file).
+ */
+export function demoSearchLeave(opts: {
+  gsl?: string;
+  id?: string;
+  q?: string;
+  limit?: number;
+}): DemoRecord[] {
+  const { gsl, id, q, limit = 50 } = opts;
+  let results = [...readDemoStore()];
+  if (gsl) {
+    results = results.filter((r) => r.gsl_code.toLowerCase().includes(gsl.toLowerCase()));
+  } else if (id) {
+    results = results.filter((r) =>
+      r.identity_number.toLowerCase().includes(id.toLowerCase()),
+    );
+  } else if (q) {
+    const ql = q.toLowerCase();
+    results = results.filter(
+      (r) =>
+        r.gsl_code.toLowerCase().includes(ql) ||
+        r.identity_number.toLowerCase().includes(ql) ||
+        (r.name_ar || "").toLowerCase().includes(ql) ||
+        (r.name_en || "").toLowerCase().includes(ql),
+    );
+  }
+  results.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  return results.slice(0, limit);
+}
+
+// =================================================================
+//  SQL SCHEMA — runs once during database setup
 // =================================================================
 
 export const SCHEMA_SQL = `
@@ -106,8 +228,8 @@ CREATE INDEX IF NOT EXISTS idx_sick_leaves_name ON sick_leaves(name_ar);
 `;
 
 /**
- * يُنفّذ schema.sql على قاعدة البيانات — يُستدعى مرة واحدة عند الإعداد.
- * آمن للاستدعاء المتكرر (CREATE TABLE IF NOT EXISTS).
+ * Initialize database schema — call once during setup.
+ * Safe to call repeatedly (CREATE TABLE IF NOT EXISTS).
  */
 export async function initDatabase(): Promise<void> {
   await sql.query(SCHEMA_SQL);

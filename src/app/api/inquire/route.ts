@@ -10,7 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@/lib/db";
+import { sql, isDemoMode, demoSearchLeave } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +22,37 @@ export async function GET(req: NextRequest) {
     const id = searchParams.get("id")?.trim();
     const q = searchParams.get("q")?.trim();
     const limit = Math.min(parseInt(searchParams.get("limit") || "50", 10), 100);
+
+    // وضع العرض: ابحث في الذاكرة
+    if (isDemoMode()) {
+      const demoRows = demoSearchLeave({ gsl, id, q, limit });
+      const formatted = demoRows.map((r) => ({
+        id: r.id,
+        gslCode: r.gsl_code,
+        identityNumber: r.identity_number,
+        nameAr: r.name_ar,
+        nameEn: r.name_en,
+        dateFrom: r.date_from,
+        dateTo: r.date_to,
+        dayCount: r.day_count,
+        issueDate: r.issue_date,
+        timeFrom: r.time_from,
+        nationalityAr: r.nationality_ar,
+        nationalityEn: r.nationality_en,
+        employer: r.employer,
+        employerEn: r.employer_en,
+        doctorNameAr: r.doctor_name_ar,
+        doctorNameEn: r.doctor_name_en,
+        doctorSpecialtyAr: r.doctor_specialty_ar,
+        doctorSpecialtyEn: r.doctor_specialty_en,
+        hospitalNameAr: r.hospital_name_ar,
+        hospitalNameEn: r.hospital_name_en,
+        licenseNumber: r.license_number,
+        leaveType: r.leave_type,
+        createdAt: r.created_at,
+      }));
+      return NextResponse.json({ success: true, count: formatted.length, records: formatted });
+    }
 
     let rows: any[] = [];
 
