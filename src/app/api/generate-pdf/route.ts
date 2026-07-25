@@ -457,8 +457,10 @@ export async function POST(req: NextRequest) {
 
     const durText = getArabicDuration(payload.dayCount);
     // أزل "(s)" بعد كلمة day بناءً على طلب المستخدم — أصبحت "day" فقط.
+    // أضف مسافة قبل القوس المفتوح وبعد القوس المغلق لمطابقة التنسيق المرجعي.
     // Removed the "(s)" after "day" per user request — now just "day".
-    const duration = `${payload.dayCount} day (${startDateFormatted} to ${endDateFormatted})`;
+    // Added space before "(" and after ")" to match reference format.
+    const duration = `${payload.dayCount} day ( ${startDateFormatted} to ${endDateFormatted} )`;
 
     drawRow("Leave ID", payload.leaveNumber, "رمز الإجازة");
 
@@ -506,23 +508,38 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    // عرض خلية المدة العربية كمقاطع نصية منفصلة في مربعات نص مستقلة:
-    // كل قوس، كل تاريخ، وكلمة "الى" كل في مربع نص لحاله تفادياً لتخبط BiDi
-    // وعكس الأرقام. كل المقاطع في سطر واحد (lineBreak: false) ومحاذاة لليمين.
+    // عرض خلية المدة العربية بمقاطع منفصلة لمطابقة التنسيق المرجعي:
+    // التنسيق المرئي L→R: `N يوم ( YYYY-MM-DD إلى YYYY-MM-DD )`
+    // — عدد الأيام والقوس المفتوح على اليسار البصري،
+    // — التواريخ بصيغة YYYY-MM-DD (مطابقة للمرجع)،
+    // — كلمة "إلى" بين التاريخين،
+    // — القوس المغلق على اليمين البصري.
     //
-    // Render the Arabic duration cell as separate text pieces in independent
-    // text boxes: each bracket, each date, and the word "الى" each in its own
-    // box to avoid BiDi mixing and digit reversal. All pieces on one line
-    // (lineBreak: false), right-aligned.
+    // Render the Arabic duration cell as separate pieces to match the reference:
+    // Visual L→R: `N يوم ( YYYY-MM-DD إلى YYYY-MM-DD )`
+    // — Day count + open paren on visual LEFT,
+    // — Dates in YYYY-MM-DD format (matching reference),
+    // — "إلى" between the two dates,
+    // — Close paren on visual RIGHT.
+    const toArabicDate = (ddmmyyyy: string) => {
+      // حوّل DD-MM-YYYY إلى YYYY-MM-DD لمطابقة التنسيق المرجعي
+      // Convert DD-MM-YYYY to YYYY-MM-DD to match reference format
+      const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(ddmmyyyy);
+      if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+      return ddmmyyyy;
+    };
+    const startDateAr = toArabicDate(startDateFormatted);
+    const endDateAr = toArabicDate(endDateFormatted);
     const durPieces = [
-      { text: durText, font: fontArReg },                  // يميني: المدة بالعربي / rightmost: Arabic duration
+      { text: " ) ", font: fontEnReg },                    // يميني بصرياً: قوس إغلاق / visual rightmost: close paren
+      { text: " ", font: fontEnReg },                      // مسافة / space
+      { text: endDateAr, font: fontEnReg },                // التاريخ الثاني YYYY-MM-DD / second date YYYY-MM-DD
+      { text: " ", font: fontEnReg },                      // مسافة / space
+      { text: "الى", font: fontArReg },                    // كلمة "الى" / "to" word
+      { text: " ", font: fontEnReg },                      // مسافة / space
+      { text: startDateAr, font: fontEnReg },              // التاريخ الأول YYYY-MM-DD / first date YYYY-MM-DD
       { text: " ( ", font: fontEnReg },                    // مسافة + قوس فتح + مسافة / space + open paren + space
-      { text: startDateFormatted, font: fontEnReg },       // التاريخ الأول (LTR) / first date
-      { text: " ", font: fontEnReg },                      // مسافة / space
-      { text: "الى", font: fontArReg },                    // كلمة "الى" في مربع مستقل / "to" word in its own box
-      { text: " ", font: fontEnReg },                      // مسافة / space
-      { text: endDateFormatted, font: fontEnReg },         // التاريخ الثاني (LTR) / second date
-      { text: " ) ", font: fontEnReg },                    // مسافة + قوس إغلاق + مسافة / space + close paren + space
+      { text: durText, font: fontArReg },                  // يساري بصرياً: المدة بالعربي / visual leftmost: Arabic duration
     ];
     renderPiecesRtl({
       pieces: durPieces,
@@ -606,40 +623,39 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // تخطيط اسم المنشأة في التذييل:
-    // - بدون رقم ترخيص: الاسم العربي والإنجليزي في سطر واحد (عربي يمين، إنجليزي يسار).
-    // - مع رقم ترخيص: الاسم العربي في السطر الأول، الإنجليزي ينزل للسطر الثاني،
-    //   ثم رقم الترخيص في السطر الثالث.
+    // تخطيط اسم المنشأة في التذييل — مطابق للتنسيق المرجعي:
+    // - الاسم العربي في السطر الأول
+    // - الاسم الإنجليزي في السطر الثاني (دائماً في سطر مستقل)
+    // - رقم الترخيص (إن وُجد) في السطر الثالث
     //
-    // Footer hospital name layout:
-    // - Without license number: Arabic and English names on one line (AR right, EN left).
-    // - With license number: Arabic on line 1, English drops to line 2,
-    //   then license number on line 3.
+    // Footer hospital name layout — matches reference format:
+    // - Arabic name on line 1
+    // - English name on line 2 (always on its own line)
+    // - License number (if any) on line 3
+    drawTextAr(payload.hospitalName || "", rightCenterX - 125, footerY + 100, {
+      width: 250,
+      align: "center",
+      weight: "bold",
+      fontSize: 12,
+      color: "#000000",
+    });
+    drawTextEn(payload.hospitalNameEn || "", rightCenterX - 125, footerY + 130, {
+      width: 250,
+      align: "center",
+      weight: "bold",
+      fontSize: 12,
+      color: "#000000",
+    });
+
     const hasLicense = !!(payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim()));
-
     if (hasLicense) {
-      // 3 أسطر: عربي، إنجليزي، ترخيص / 3 lines: AR, EN, license
-      drawTextAr(payload.hospitalName || "", rightCenterX - 125, footerY + 100, {
-        width: 250,
-        align: "center",
-        weight: "bold",
-        fontSize: 12,
-        color: "#000000",
-      });
-      drawTextEn(payload.hospitalNameEn || "", rightCenterX - 125, footerY + 130, {
-        width: 250,
-        align: "center",
-        weight: "bold",
-        fontSize: 12,
-        color: "#000000",
-      });
-
       // رقم الترخيص في السطر الثالث — اعرضه كمقاطع منفصلة لمنع عكس الأرقام
       // License number on line 3 — render as separate pieces to prevent digit reversal
       const licensePieces = [
-        { text: "رقم الترخيص:", font: fontArReg },
-        { text: " ", font: fontEnReg },
-        { text: payload.licenseNumber, font: fontEnReg },
+        { text: ":", font: fontEnReg },                       // يميني بصرياً: نقطتين / visual rightmost: colon
+        { text: payload.licenseNumber, font: fontEnReg },     // الرقم / the number
+        { text: " ", font: fontEnReg },                       // مسافة / space
+        { text: "رقم الترخيص", font: fontArReg },             // يساري بصرياً: النص العربي / visual leftmost: Arabic label
       ];
       renderPiecesRtl({
         pieces: licensePieces,
@@ -647,23 +663,6 @@ export async function POST(req: NextRequest) {
         y: footerY + 158,
         width: 300,
         height: 25,
-        fontSize: 12,
-        color: "#000000",
-      });
-    } else {
-      // سطر واحد: عربي (يمين) + إنجليزي (يسار) — كلاهما في نفس الـ Y
-      // One line: AR (right) + EN (left) — both at the same Y
-      const namePieces = [
-        { text: payload.hospitalName || "", font: fontArBold },   // يميني: الاسم عربي / rightmost: AR name
-        { text: "    ", font: fontEnReg },                        // فاصل 4 مسافات / 4-space separator
-        { text: payload.hospitalNameEn || "", font: fontEnBold }, // يساري: الاسم إنجليزي / leftmost: EN name
-      ];
-      renderPiecesRtl({
-        pieces: namePieces,
-        x: rightCenterX - 150,
-        y: footerY + 100,
-        width: 300,
-        height: 30,
         fontSize: 12,
         color: "#000000",
       });
