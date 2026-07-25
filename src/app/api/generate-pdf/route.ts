@@ -227,19 +227,29 @@ export async function POST(req: NextRequest) {
     };
 
     /**
-     * اعرض عدة مقاطع نصية في صف واحد، محاذاة لليمين (RTL)، كل مقطع بخطه الخاص.
-     * هذا يتلافى مشكلة BiDi في pdfkit التي تعكس الأرقام والأقواس في النصوص المختلطة.
+     * اعرض عدة مقاطع نصية في صف واحد بترتيب بصري (يسار→يمين على الشاشة)،
+     * كل مقطع بخطه الخاص. كل مقطع يجب أن يكون نقي الاتجاه (إما عربي فقط أو
+     * لاتيني فقط) لمنع خوارزمية BiDi في pdfkit من إعادة ترتيب الأحرف داخل
+     * المقطع.
      *
-     * Renders multiple text pieces on a single line, right-aligned (RTL),
-     * each piece with its own font. This avoids pdfkit's BiDi reversing
-     * digits and brackets in mixed RTL/LTR text.
+     * Renders multiple text pieces on a single line in VISUAL order
+     * (left-to-right on screen). Each piece MUST be pure-direction (either
+     * all-Arabic or all-Latin/digits) to prevent pdfkit's BiDi from
+     * reordering characters within a piece.
      *
-     * كل مقطع يُعرض في مربع نص مستقل (text box) كما طلب المستخدم: الأقواس،
-     * التواريخ، وكلمة "الى" كل في مربع لحاله تفادياً للتخبط.
-     * Each piece is rendered in its own text box per user request: brackets,
-     * dates, and the word "الى" each in its own box to avoid mixing.
+     * المقاربة مطابقة لما يفعله بوت Python عبر دالة `render_mixed_font_cell_v2`
+     * — يبني النص بترتيب بصري محسوب يدوياً ثم يعرض كل مقطع بخطه المناسب
+     * (NotoSansArabic للعربي، Times-Roman للاتيني/الأرقام).
+     *
+     * This mirrors the Python bot's `render_mixed_font_cell_v2` approach —
+     * build the text in manually-computed visual order, then render each
+     * piece with the appropriate font (NotoSansArabic for Arabic,
+     * Times-Roman for Latin/digits).
+     *
+     * وضع المحاذاة الأفقي: 'center' (توسيط) أو 'right' (محاذاة لليمين).
+     * Horizontal alignment: 'center' or 'right'.
      */
-    const renderPiecesRtl = (opts: {
+    const renderVisualPieces = (opts: {
       pieces: { text: string; font: any }[];
       x: number;
       y: number;
@@ -247,8 +257,10 @@ export async function POST(req: NextRequest) {
       height: number;
       fontSize: number;
       color: string;
+      align?: "center" | "right" | "left";
     }) => {
-      const { pieces, x, y, width, height, fontSize, color } = opts;
+      const { pieces, x, y, width, height, fontSize, color, align = "center" } = opts;
+      if (pieces.length === 0) return;
 
       // احسب عرض كل مقطع بالخط الخاص به
       // Compute width of each piece using its own font
@@ -256,6 +268,8 @@ export async function POST(req: NextRequest) {
         doc.font(p.font).fontSize(fontSize);
         return doc.widthOfString(p.text);
       });
+      const totalWidth = widths.reduce((a, b) => a + b, 0);
+      if (totalWidth <= 0) return;
 
       // ارتفاع السطر للتوسيط الرأسي
       // Line height for vertical centering
@@ -263,21 +277,29 @@ export async function POST(req: NextRequest) {
       const textH = doc.currentLineHeight(true);
       const pieceY = y + (height - textH) / 2;
 
-      // محاذاة لليمين: ابدأ من الحافة اليمنى للخلية، ضع كل مقطع بيمينه عند الحافة
-      // ثم حرّك الحافة إلى اليسار بعرض المقطع.
-      // Right-align: start from the cell's right edge, place each piece's
-      // right edge at the current right edge, then move the edge left by
-      // the piece's width.
-      let rightEdge = x + width;
+      // احسب الإزاحة الأفقية الابتدائية حسب المحاذاة
+      // Compute starting X offset based on alignment
+      let cursorX: number;
+      if (align === "center") {
+        cursorX = x + (width - totalWidth) / 2;
+      } else if (align === "right") {
+        cursorX = x + width - totalWidth;
+      } else {
+        cursorX = x;
+      }
+
+      // اعرض كل مقطع بإحداثياته المطلقة — لا تستخدم continued:true لأنه
+      // يفعّل BiDi على مستوى السطر كاملاً مما يعيد ترتيب المقاطع.
+      // Render each piece at its absolute coordinates — do NOT use
+      // continued:true because it triggers line-level BiDi that reorders
+      // pieces.
       for (let i = 0; i < pieces.length; i++) {
         const piece = pieces[i];
-        const w = widths[i];
-        const pieceX = rightEdge - w;
         doc.font(piece.font).fillColor(color).fontSize(fontSize);
         // lineBreak: false يمنع لف النص إلى سطر جديد (كل البيانات في سطر واحد)
         // lineBreak: false prevents wrapping (all data on one line)
-        doc.text(piece.text, pieceX, pieceY, { lineBreak: false });
-        rightEdge = pieceX;
+        doc.text(piece.text, cursorX, pieceY, { lineBreak: false });
+        cursorX += widths[i];
       }
     };
 
@@ -508,21 +530,27 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    // عرض خلية المدة العربية — التنسيق المطلوب (L→R مرئي):
-    // `1 يوم (2026-06-09 إلى 2026-06-09)`
-    // — `1 يوم` على اليسار البصري
-    // — `(` يليه التاريخ الأول بصيغة YYYY-MM-DD
-    // — `إلى` بين التاريخين
-    // — التاريخ الثاني ثم `)` على اليمين البصري
-    // — مسافة واحدة بين كل عنصر، النص محاذى لليمين داخل الخلية
+    // عرض خلية المدة العربية — مطابقة لإخراج بوت Python.
     //
-    // Render the Arabic duration cell — required format (visual L→R):
-    // `1 يوم (2026-06-09 إلى 2026-06-09)`
-    // — `1 يوم` on visual LEFT
-    // — `(` followed by first date in YYYY-MM-DD
-    // — `إلى` between the two dates
-    // — Second date then `)` on visual RIGHT
-    // — Single space between elements, text right-aligned in cell
+    // البوت يبني النص المنطقي: `1 يوم (date1 إلى date2)` ثم يطبّق
+    // arabic_reshaper + python-bidi للحصول على الترتيب البصري:
+    //   `) date2 إلى date1 ( يوم 1`  (مرئي L→R على الشاشة)
+    //
+    // بما أنه لا تتوفر مكتبة BiDi في Node.js، نحسب الترتيب البصري يدوياً
+    // لِنمطنا المحدد، ونُعرِض كل مقطع بخطه الخاص (NotoSansArabic للعربي،
+    // Times-Roman للأرقام/الأقواس). كل مقطع نقي الاتجاه، فلا يُعاد ترتيبه
+    // بواسطة BiDi في pdfkit.
+    //
+    // Render the Arabic duration cell — mirrors Python bot's output.
+    //
+    // The bot builds logical text `1 يوم (date1 إلى date2)` then runs
+    // arabic_reshaper + python-bidi to get visual order:
+    //   `) date2 إلى date1 ( يوم 1`  (visual L→R on screen)
+    //
+    // Since Node has no BiDi library, we manually compute the visual order
+    // for our specific pattern and render each piece with its own font
+    // (NotoSansArabic for Arabic, Times-Roman for digits/brackets). Each
+    // piece is pure-direction so pdfkit's BiDi won't reorder within it.
     const toArabicDate = (ddmmyyyy: string) => {
       // حوّل DD-MM-YYYY إلى YYYY-MM-DD لمطابقة التنسيق المطلوب
       // Convert DD-MM-YYYY to YYYY-MM-DD to match required format
@@ -532,22 +560,38 @@ export async function POST(req: NextRequest) {
     };
     const startDateAr = toArabicDate(startDateFormatted);
     const endDateAr = toArabicDate(endDateFormatted);
-    // renderPiecesRtl يضع العنصر الأول على اليمين البصري والأخير على اليسار.
-    // لذلك نعكس ترتيب المصفوفة ليصبح النص L→R: `durText (date1 إلى date2)`
-    // renderPiecesRtl places first array element on visual RIGHT, last on LEFT.
-    // So we reverse the array order to get L→R text: `durText (date1 إلى date2)`
+
+    // فكّ المدة العربية إلى رقم + كلمة عربية. هذا ضروري لأن المدة العربية
+    // تحتوي على رقم لاتيني مع كلمة عربية (مثل "1 يوم")، ولكي نُبقي كل مقطع
+    // نقي الاتجاه يجب فصل الرقم عن الكلمة.
+    // Split the Arabic duration text into a digit + Arabic word. This is
+    // required because the Arabic duration contains a Latin digit mixed
+    // with an Arabic word (e.g., "1 يوم"); to keep each piece pure-
+    // direction we must separate the digit from the word.
+    const durParts = /^(\d+)\s+(.+)$/.exec(durText);
+    const durDigit = durParts ? durParts[1] : String(payload.dayCount);
+    const durWord = durParts ? durParts[2] : "يوم";
+
+    // المقاطع بترتيب بصري L→R على الشاشة (مطابق لإخراج البوت):
+    //   `) date2 إلى date1 ( يوم 1`
+    // Pieces in visual L→R order on screen (matches bot output):
+    //   `) date2 إلى date1 ( يوم 1`
     const durPieces = [
-      { text: ")", font: fontEnReg },              // يميني بصرياً: قوس إغلاق / visual rightmost: close paren
-      { text: endDateAr, font: fontEnReg },        // التاريخ الثاني YYYY-MM-DD / second date YYYY-MM-DD
-      { text: " ", font: fontEnReg },              // مسافة / space
-      { text: "إلى", font: fontArReg },            // كلمة "إلى" / "to" word
-      { text: " ", font: fontEnReg },              // مسافة / space
-      { text: startDateAr, font: fontEnReg },      // التاريخ الأول YYYY-MM-DD / first date YYYY-MM-DD
-      { text: "(", font: fontEnReg },              // قوس فتح / open paren
-      { text: " ", font: fontEnReg },              // مسافة / space
-      { text: durText, font: fontArReg },          // يساري بصرياً: المدة بالعربي / visual leftmost: Arabic duration
+      { text: ")", font: fontEnReg },                  // يساري بصرياً: قوس إغلاق / visual leftmost: close paren
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: endDateAr, font: fontEnReg },            // التاريخ الثاني YYYY-MM-DD / second date
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: "إلى", font: fontArReg },                // كلمة "إلى" بين التاريخين / "to" word between dates
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: startDateAr, font: fontEnReg },          // التاريخ الأول YYYY-MM-DD / first date
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: "(", font: fontEnReg },                  // قوس فتح / open paren
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: durWord, font: fontArReg },              // الكلمة العربية (يوم/يومان/أيام) / Arabic word
+      { text: " ", font: fontEnReg },                  // مسافة / space
+      { text: durDigit, font: fontEnReg },             // يميني بصرياً: الرقم / visual rightmost: the digit
     ];
-    renderPiecesRtl({
+    renderVisualPieces({
       pieces: durPieces,
       x: startX + col1W + subColW + 10,
       y: currentY,
@@ -555,6 +599,7 @@ export async function POST(req: NextRequest) {
       height: rowH,
       fontSize: durFontSize - 1,
       color: "#ffffff",
+      align: "center",
     });
 
     doc.restore();
@@ -655,28 +700,34 @@ export async function POST(req: NextRequest) {
 
     const hasLicense = !!(payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim()));
     if (hasLicense) {
-      // رقم الترخيص في سطر منفصل — التنسيق المطلوب (R→L مرئي):
-      // `رقم الترخيص: 1410101201200443`
-      // — `رقم الترخيص` على اليمين البصري
-      // — `:` (نقطتين) مباشرة بعد الكلمة العربية
-      // — ` ` (مسافة)
-      // — الرقم على اليسار البصري
-      // الرقم يظهر مقابل الكلمة (على نفس السطر) مع النقطتين بينهما.
+      // رقم الترخيص في سطر منفصل — مطابق لإخراج بوت Python.
       //
-      // License number on a separate line — required format (visual R→L):
-      // `رقم الترخيص: 1410101201200443`
-      // — `رقم الترخيص` on visual RIGHT
-      // — `:` (colon) immediately after the Arabic word
-      // — ` ` (space)
-      // — The number on visual LEFT
-      // The number appears opposite the word (same line) with colon between them.
+      // البوت يبني النص المنطقي: `رقم الترخيص : 1410101201200443` ثم
+      // يطبّق arabic_reshaper + python-bidi للحصول على الترتيب البصري:
+      //   `1410101201200443 : رقم الترخيص`  (مرئي L→R على الشاشة)
+      //
+      // نُكرّر نفس النهج: نُحسب الترتيب البصري يدوياً ونُعرِض كل مقطع
+      // بخطه (NotoSansArabic للعربي، Times-Roman للأرقام والنقطتين).
+      // السطر مُوسَّط أفقيًا كما في البوت.
+      //
+      // License number on a separate line — mirrors Python bot's output.
+      //
+      // The bot builds logical text `رقم الترخيص : 1410101201200443` then
+      // applies arabic_reshaper + python-bidi to get visual order:
+      //   `1410101201200443 : رقم الترخيص`  (visual L→R on screen)
+      //
+      // We replicate this: manually compute visual order, render each
+      // piece with its own font (NotoSansArabic for Arabic, Times-Roman
+      // for digits and colon). The line is horizontally centered, like
+      // the bot.
       const licensePieces = [
-        { text: "رقم الترخيص", font: fontArReg },             // يميني بصرياً: العبارة العربية / visual rightmost: Arabic label
-        { text: ":", font: fontEnReg },                        // نقطتين مباشرة بعد الكلمة / colon right after the word
-        { text: " ", font: fontEnReg },                        // مسافة / space
         { text: payload.licenseNumber, font: fontEnReg },     // يساري بصرياً: الرقم / visual leftmost: the number
+        { text: " ", font: fontEnReg },                       // مسافة / space
+        { text: ":", font: fontEnReg },                       // نقطتين / colon
+        { text: " ", font: fontEnReg },                       // مسافة / space
+        { text: "رقم الترخيص", font: fontArReg },             // يميني بصرياً: العبارة العربية / visual rightmost: Arabic label
       ];
-      renderPiecesRtl({
+      renderVisualPieces({
         pieces: licensePieces,
         x: rightCenterX - 150,
         y: footerY + 158,
@@ -684,6 +735,7 @@ export async function POST(req: NextRequest) {
         height: 25,
         fontSize: 12,
         color: "#000000",
+        align: "center",
       });
     }
 
