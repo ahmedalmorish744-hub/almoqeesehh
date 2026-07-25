@@ -58,3 +58,11 @@ server.log
 # Local env
 .env
 .env.local
+
+# Local-only files
+/upload/
+/tool-results/
+/.zscripts/
+/alehtiat-almorish
+Caddyfile
+download/
