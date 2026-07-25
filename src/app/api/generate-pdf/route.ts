@@ -508,21 +508,21 @@ export async function POST(req: NextRequest) {
       color: "#ffffff",
     });
 
-    // عرض خلية المدة العربية باتجاه RTL (من اليمين إلى اليسار) مع تنسيق مطابق للمثال:
+    // عرض خلية المدة العربية — التنسيق المطلوب (L→R مرئي):
     // `1 يوم (2026-06-09 إلى 2026-06-09)`
-    // — `1 يوم` على اليمين البصري (بداية القراءة RTL)
+    // — `1 يوم` على اليسار البصري
     // — `(` يليه التاريخ الأول بصيغة YYYY-MM-DD
     // — `إلى` بين التاريخين
-    // — التاريخ الثاني ثم `)` على اليسار البصري (نهاية القراءة RTL)
-    // — مسافة واحدة فقط بين كل عنصر، بلا مسافات داخل الأقواس
+    // — التاريخ الثاني ثم `)` على اليمين البصري
+    // — مسافة واحدة بين كل عنصر، النص محاذى لليمين داخل الخلية
     //
-    // Render the Arabic duration cell in true RTL direction matching the example:
+    // Render the Arabic duration cell — required format (visual L→R):
     // `1 يوم (2026-06-09 إلى 2026-06-09)`
-    // — `1 يوم` on visual RIGHT (RTL start)
+    // — `1 يوم` on visual LEFT
     // — `(` followed by first date in YYYY-MM-DD
     // — `إلى` between the two dates
-    // — Second date then `)` on visual LEFT (RTL end)
-    // — Single space between elements, no spaces inside parens
+    // — Second date then `)` on visual RIGHT
+    // — Single space between elements, text right-aligned in cell
     const toArabicDate = (ddmmyyyy: string) => {
       // حوّل DD-MM-YYYY إلى YYYY-MM-DD لمطابقة التنسيق المطلوب
       // Convert DD-MM-YYYY to YYYY-MM-DD to match required format
@@ -532,19 +532,20 @@ export async function POST(req: NextRequest) {
     };
     const startDateAr = toArabicDate(startDateFormatted);
     const endDateAr = toArabicDate(endDateFormatted);
-    // الترتيب: العنصر الأول في المصفوفة يُوضع على اليمين البصري،
-    // والعنصر الأخير على اليسار البصري (محاذاة لليمين مع تدفق RTL).
-    // Order: first array element is placed on visual RIGHT,
-    // last element on visual LEFT (right-aligned with RTL flow).
+    // renderPiecesRtl يضع العنصر الأول على اليمين البصري والأخير على اليسار.
+    // لذلك نعكس ترتيب المصفوفة ليصبح النص L→R: `durText (date1 إلى date2)`
+    // renderPiecesRtl places first array element on visual RIGHT, last on LEFT.
+    // So we reverse the array order to get L→R text: `durText (date1 إلى date2)`
     const durPieces = [
-      { text: durText, font: fontArReg },          // يميني بصرياً: المدة بالعربي / visual rightmost: Arabic duration (e.g. "1 يوم")
-      { text: " (", font: fontEnReg },             // مسافة + قوس فتح / space + open paren
-      { text: startDateAr, font: fontEnReg },      // التاريخ الأول YYYY-MM-DD / first date
+      { text: ")", font: fontEnReg },              // يميني بصرياً: قوس إغلاق / visual rightmost: close paren
+      { text: endDateAr, font: fontEnReg },        // التاريخ الثاني YYYY-MM-DD / second date YYYY-MM-DD
       { text: " ", font: fontEnReg },              // مسافة / space
       { text: "إلى", font: fontArReg },            // كلمة "إلى" / "to" word
       { text: " ", font: fontEnReg },              // مسافة / space
-      { text: endDateAr, font: fontEnReg },        // التاريخ الثاني YYYY-MM-DD / second date
-      { text: ")", font: fontEnReg },              // يساري بصرياً: قوس إغلاق / visual leftmost: close paren
+      { text: startDateAr, font: fontEnReg },      // التاريخ الأول YYYY-MM-DD / first date YYYY-MM-DD
+      { text: "(", font: fontEnReg },              // قوس فتح / open paren
+      { text: " ", font: fontEnReg },              // مسافة / space
+      { text: durText, font: fontArReg },          // يساري بصرياً: المدة بالعربي / visual leftmost: Arabic duration
     ];
     renderPiecesRtl({
       pieces: durPieces,
@@ -654,20 +655,25 @@ export async function POST(req: NextRequest) {
 
     const hasLicense = !!(payload.licenseNumber && !emptyIndicators.has(payload.licenseNumber.trim()));
     if (hasLicense) {
-      // رقم الترخيص في سطر منفصل باتجاه RTL مع عبارة "رقم الترخيص:" قبله:
-      // التنسيق المرئي R→L: `رقم الترخيص: 1410101201200443`
-      // — `رقم الترخيص` على اليمين البصري (بداية RTL)
-      // — `: ` (نقطتين + مسافة)
-      // — الرقم على اليسار البصري (نهاية RTL)
+      // رقم الترخيص في سطر منفصل — التنسيق المطلوب (R→L مرئي):
+      // `رقم الترخيص: 1410101201200443`
+      // — `رقم الترخيص` على اليمين البصري
+      // — `:` (نقطتين) مباشرة بعد الكلمة العربية
+      // — ` ` (مسافة)
+      // — الرقم على اليسار البصري
+      // الرقم يظهر مقابل الكلمة (على نفس السطر) مع النقطتين بينهما.
       //
-      // License number on a separate line in RTL direction with "رقم الترخيص:" before it:
-      // Visual R→L: `رقم الترخيص: 1410101201200443`
-      // — `رقم الترخيص` on visual RIGHT (RTL start)
-      // — `: ` (colon + space)
-      // — The number on visual LEFT (RTL end)
+      // License number on a separate line — required format (visual R→L):
+      // `رقم الترخيص: 1410101201200443`
+      // — `رقم الترخيص` on visual RIGHT
+      // — `:` (colon) immediately after the Arabic word
+      // — ` ` (space)
+      // — The number on visual LEFT
+      // The number appears opposite the word (same line) with colon between them.
       const licensePieces = [
         { text: "رقم الترخيص", font: fontArReg },             // يميني بصرياً: العبارة العربية / visual rightmost: Arabic label
-        { text: ": ", font: fontEnReg },                      // نقطتين + مسافة / colon + space
+        { text: ":", font: fontEnReg },                        // نقطتين مباشرة بعد الكلمة / colon right after the word
+        { text: " ", font: fontEnReg },                        // مسافة / space
         { text: payload.licenseNumber, font: fontEnReg },     // يساري بصرياً: الرقم / visual leftmost: the number
       ];
       renderPiecesRtl({
